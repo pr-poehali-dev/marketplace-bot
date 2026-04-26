@@ -360,6 +360,107 @@ export default function Index() {
                 </div>
               </div>
 
+              {/* ── COMPARE BLOCK (only "all") ── */}
+              {platform === "all" && (
+                <div className="rounded-lg border border-border overflow-hidden" style={{ background: "hsl(220,14%,9%)" }}>
+                  <div className="flex items-center justify-between px-5 pt-5 pb-4 border-b border-border">
+                    <div className="flex items-center gap-2">
+                      <Icon name="GitCompare" size={15} className="text-primary" />
+                      <h2 className="text-sm font-semibold text-foreground">Сравнение площадок</h2>
+                    </div>
+                    <span className="text-xs text-muted-foreground">апрель 2026</span>
+                  </div>
+
+                  {/* Header row */}
+                  <div className="grid grid-cols-[1fr_140px_140px] border-b border-border">
+                    <div className="px-5 py-2.5" />
+                    <div className="px-4 py-2.5 flex items-center gap-2 border-l border-border" style={{ background: "rgba(0,91,255,0.06)" }}>
+                      <span className="w-2 h-2 rounded-full" style={{ background: "#005BFF" }} />
+                      <span className="text-xs font-semibold text-blue-400">Ozon</span>
+                    </div>
+                    <div className="px-4 py-2.5 flex items-center gap-2 border-l border-border" style={{ background: "rgba(203,17,171,0.06)" }}>
+                      <span className="w-2 h-2 rounded-full" style={{ background: "#CB11AB" }} />
+                      <span className="text-xs font-semibold text-pink-400">Wildberries</span>
+                    </div>
+                  </div>
+
+                  {[
+                    {
+                      label: "Выручка за месяц",
+                      ozon: { val: "2 641 000 ₽", raw: 2641000 },
+                      wb:   { val: "2 180 300 ₽", raw: 2180300 },
+                    },
+                    {
+                      label: "Заказов сегодня",
+                      ozon: { val: "198", raw: 198 },
+                      wb:   { val: "149", raw: 149 },
+                    },
+                    {
+                      label: "Средний чек",
+                      ozon: { val: "13 338 ₽", raw: 13338 },
+                      wb:   { val: "14 632 ₽", raw: 14632 },
+                    },
+                    {
+                      label: "Маржа",
+                      ozon: { val: "24.1%", raw: 24.1 },
+                      wb:   { val: "20.8%", raw: 20.8 },
+                    },
+                    {
+                      label: "Чистая прибыль",
+                      ozon: { val: "636 000 ₽", raw: 636000 },
+                      wb:   { val: "460 500 ₽", raw: 460500 },
+                    },
+                    {
+                      label: "Отменённых заказов",
+                      ozon: { val: "5", raw: 5 },
+                      wb:   { val: "3", raw: 3 },
+                      lowerIsBetter: true,
+                    },
+                  ].map((row, i) => {
+                    const ozonWins = row.lowerIsBetter ? row.ozon.raw <= row.wb.raw : row.ozon.raw >= row.wb.raw;
+                    const wbWins   = row.lowerIsBetter ? row.wb.raw <= row.ozon.raw : row.wb.raw >= row.ozon.raw;
+                    const tie = row.ozon.raw === row.wb.raw;
+                    return (
+                      <div
+                        key={row.label}
+                        className={`grid grid-cols-[1fr_140px_140px] border-b border-border last:border-0 ${i % 2 === 1 ? "" : ""}`}
+                      >
+                        <div className="px-5 py-3 text-xs text-muted-foreground flex items-center">{row.label}</div>
+                        <div
+                          className="px-4 py-3 border-l border-border flex items-center justify-between"
+                          style={{ background: "rgba(0,91,255,0.04)" }}
+                        >
+                          <span className="text-sm font-mono-num text-foreground">{row.ozon.val}</span>
+                          {!tie && ozonWins && <Icon name="ChevronUp" size={13} className="text-green-400" />}
+                          {!tie && !ozonWins && <Icon name="ChevronDown" size={13} className="text-red-400" />}
+                        </div>
+                        <div
+                          className="px-4 py-3 border-l border-border flex items-center justify-between"
+                          style={{ background: "rgba(203,17,171,0.04)" }}
+                        >
+                          <span className="text-sm font-mono-num text-foreground">{row.wb.val}</span>
+                          {!tie && wbWins && <Icon name="ChevronUp" size={13} className="text-green-400" />}
+                          {!tie && !wbWins && <Icon name="ChevronDown" size={13} className="text-red-400" />}
+                        </div>
+                      </div>
+                    );
+                  })}
+
+                  {/* Bar comparison — revenue share */}
+                  <div className="px-5 py-4 border-t border-border">
+                    <p className="text-xs text-muted-foreground mb-2">Доля выручки</p>
+                    <div className="flex h-2 rounded-full overflow-hidden gap-px">
+                      <div className="h-full transition-all duration-700" style={{ width: "54.8%", background: "#005BFF" }} />
+                      <div className="h-full transition-all duration-700" style={{ width: "45.2%", background: "#CB11AB" }} />
+                    </div>
+                    <div className="flex justify-between mt-1.5 text-[10px] text-muted-foreground font-mono-num">
+                      <span style={{ color: "#005BFF" }}>Ozon 54.8%</span>
+                      <span style={{ color: "#CB11AB" }}>WB 45.2%</span>
+                    </div>
+                  </div>
+                </div>
+              )}
+
               <div className="rounded-lg border border-border p-5" style={{ background: "hsl(220,14%,9%)" }}>
                 <div className="flex items-center gap-2 mb-4">
                   <Icon name="TrendingUp" size={15} className="text-primary" />

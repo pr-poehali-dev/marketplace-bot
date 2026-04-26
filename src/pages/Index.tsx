@@ -275,20 +275,209 @@ function calcMetrics(product: typeof CALC_PRODUCTS[0], price: number) {
   return { commission, returns, totalExpenses, profit, margin, roi, breakeven };
 }
 
+// ── Price Calc Dialog ─────────────────────────────────────────────
+function PriceCalcDialog({
+  product,
+  initialPrice,
+  onClose,
+}: {
+  product: typeof CALC_PRODUCTS[0];
+  initialPrice?: number;
+  onClose: () => void;
+}) {
+  const [calcPrice, setCalcPrice] = useState<string>(String(initialPrice ?? product.currentPrice));
+  const calcPriceNum = parseFloat(calcPrice) || 0;
+  const currentMetrics = useMemo(() => calcMetrics(product, product.currentPrice), [product]);
+  const newMetrics = useMemo(() => calcMetrics(product, calcPriceNum), [product, calcPriceNum]);
+  const accent = product.platform === "Ozon" ? "#005BFF" : "#CB11AB";
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center p-4 animate-fade-in"
+      style={{ background: "rgba(0,0,0,0.7)" }}
+      onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
+    >
+      <div
+        className="w-full max-w-2xl rounded-xl border border-border overflow-hidden animate-slide-up"
+        style={{ background: "hsl(220,14%,9%)", maxHeight: "90vh", overflowY: "auto" }}
+      >
+        {/* Header */}
+        <div className="flex items-center justify-between px-5 py-4 border-b border-border sticky top-0" style={{ background: "hsl(220,14%,9%)" }}>
+          <div className="flex items-center gap-2.5">
+            <Icon name="Calculator" size={15} className="text-primary" />
+            <div>
+              <p className="text-sm font-semibold text-foreground">{product.name}</p>
+              <div className="flex items-center gap-2 mt-0.5">
+                <span className={`text-[10px] px-1.5 py-0.5 rounded font-medium ${product.platform === "Ozon" ? "text-blue-400 bg-blue-400/10" : "text-pink-400 bg-pink-400/10"}`}>{product.platform}</span>
+                <span className="text-[10px] text-muted-foreground font-mono-num">{product.sku}</span>
+              </div>
+            </div>
+          </div>
+          <button onClick={onClose} className="w-7 h-7 flex items-center justify-center rounded hover:bg-secondary text-muted-foreground hover:text-foreground transition-colors">
+            <Icon name="X" size={15} />
+          </button>
+        </div>
+
+        {/* Slider + input */}
+        <div className="px-5 py-4 border-b border-border space-y-3">
+          <div className="flex items-center justify-between">
+            <label className="text-xs text-muted-foreground">Цена продажи</label>
+            <div className="flex items-center gap-2">
+              <input
+                type="number"
+                min={product.costPrice}
+                max={product.currentPrice * 2}
+                value={calcPrice}
+                onChange={(e) => setCalcPrice(e.target.value)}
+                className="w-28 rounded border border-border px-3 py-1.5 text-sm font-mono-num text-foreground outline-none focus:border-primary/50 transition-colors text-right"
+                style={{ background: "hsl(220,16%,6%)" }}
+              />
+              <span className="text-sm text-muted-foreground">₽</span>
+            </div>
+          </div>
+          <input
+            type="range"
+            min={product.costPrice}
+            max={product.currentPrice * 2}
+            step={10}
+            value={calcPriceNum || product.currentPrice}
+            onChange={(e) => setCalcPrice(e.target.value)}
+            className="w-full h-1.5 rounded-full appearance-none cursor-pointer"
+            style={{
+              background: (() => {
+                const min = product.costPrice;
+                const max = product.currentPrice * 2;
+                const pct = Math.min(100, Math.max(0, ((calcPriceNum - min) / (max - min)) * 100));
+                return `linear-gradient(to right, ${accent} ${pct}%, hsl(220,12%,20%) ${pct}%)`;
+              })(),
+            }}
+          />
+          <div className="flex justify-between text-[10px] text-muted-foreground font-mono-num">
+            <span>{product.costPrice} ₽ <span className="opacity-60">себест.</span></span>
+            <span>{product.currentPrice} ₽ <span className="opacity-60">текущая</span></span>
+            <span>{product.currentPrice * 2} ₽ <span className="opacity-60">макс.</span></span>
+          </div>
+          {calcPriceNum !== product.currentPrice && calcPriceNum > 0 && (
+            <p className={`text-xs font-mono-num ${calcPriceNum > product.currentPrice ? "text-green-400" : "text-red-400"}`}>
+              {calcPriceNum > product.currentPrice ? "+" : ""}
+              {(calcPriceNum - product.currentPrice).toFixed(0)} ₽
+              ({calcPriceNum > product.currentPrice ? "+" : ""}
+              {(((calcPriceNum - product.currentPrice) / product.currentPrice) * 100).toFixed(1)}%) от текущей
+            </p>
+          )}
+        </div>
+
+        {/* Metrics cards */}
+        <div className="px-5 py-4 border-b border-border">
+          <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-3">Ключевые показатели</p>
+          <div className="grid grid-cols-4 gap-3">
+            {[
+              { label: "Прибыль", current: currentMetrics.profit, next: newMetrics.profit, fmt: (v: number) => `${v.toFixed(0)} ₽`, higherBetter: true },
+              { label: "Маржа", current: currentMetrics.margin, next: newMetrics.margin, fmt: (v: number) => `${v.toFixed(1)}%`, higherBetter: true },
+              { label: "ROI", current: currentMetrics.roi, next: newMetrics.roi, fmt: (v: number) => `${v.toFixed(1)}%`, higherBetter: true },
+              { label: "Безубыточность", current: currentMetrics.breakeven, next: newMetrics.breakeven, fmt: (v: number) => `${v.toFixed(0)} ₽`, higherBetter: false },
+            ].map((m) => {
+              const delta = m.next - m.current;
+              const better = m.higherBetter ? delta > 0 : delta < 0;
+              const worse = m.higherBetter ? delta < 0 : delta > 0;
+              return (
+                <div key={m.label} className="rounded-lg p-3" style={{ background: "hsl(220,16%,6%)" }}>
+                  <p className="text-[10px] text-muted-foreground mb-1.5">{m.label}</p>
+                  <p className="text-xs text-muted-foreground font-mono-num line-through mb-0.5">{m.fmt(m.current)}</p>
+                  <p className={`text-base font-semibold font-mono-num ${better ? "text-green-400" : worse ? "text-red-400" : "text-foreground"}`}>{m.fmt(m.next)}</p>
+                  {delta !== 0 && (
+                    <p className={`text-[10px] font-mono-num mt-1 ${better ? "text-green-400" : "text-red-400"}`}>
+                      {delta > 0 ? "+" : ""}{m.fmt(delta)}
+                    </p>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+
+        {/* Cost breakdown */}
+        <div className="px-5 py-4 border-b border-border">
+          <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-3">Структура затрат</p>
+          <div className="space-y-2">
+            {[
+              { label: "Себестоимость товара", value: product.costPrice, note: "фиксированная" },
+              { label: `Комиссия площадки (${product.commissionPct}%)`, value: newMetrics.commission, note: product.platform },
+              { label: "Логистика и доставка", value: product.logisticsCost, note: "за единицу" },
+              { label: "Хранение на складе", value: product.storageCostPerUnit, note: "за единицу / мес" },
+              { label: "Реклама и продвижение", value: product.adsCostPerUnit, note: "за единицу" },
+              { label: `Возвраты (${product.returnRatePct}%)`, value: newMetrics.returns, note: "оценка" },
+            ].map((row) => (
+              <div key={row.label} className="flex items-center justify-between">
+                <div className="flex items-center gap-1.5">
+                  <span className="text-xs text-foreground">{row.label}</span>
+                  <span className="text-[10px] text-muted-foreground">· {row.note}</span>
+                </div>
+                <span className="text-xs font-mono-num text-muted-foreground">{row.value.toFixed(0)} ₽</span>
+              </div>
+            ))}
+            <div className="pt-2 border-t border-border flex items-center justify-between">
+              <span className="text-xs font-semibold text-foreground">Итого затрат</span>
+              <span className="text-xs font-mono-num font-semibold text-foreground">{newMetrics.totalExpenses.toFixed(0)} ₽</span>
+            </div>
+          </div>
+        </div>
+
+        {/* Verdict */}
+        <div className="px-5 py-4">
+          {(() => {
+            const profitOk = newMetrics.profit > 0;
+            const marginOk = newMetrics.margin >= 15;
+            const roiOk = newMetrics.roi >= 20;
+            const score = [profitOk, marginOk, roiOk].filter(Boolean).length;
+            const vColor = score === 3 ? "text-green-400" : score === 2 ? "text-yellow-400" : "text-red-400";
+            const vBg = score === 3 ? "rgba(74,222,128,0.07)" : score === 2 ? "rgba(250,204,21,0.07)" : "rgba(248,113,113,0.07)";
+            const vBorder = score === 3 ? "rgba(74,222,128,0.2)" : score === 2 ? "rgba(250,204,21,0.2)" : "rgba(248,113,113,0.2)";
+            const vText = score === 3 ? "Цена оптимальна — прибыль, маржа и ROI в норме."
+              : score === 2 ? "Цена приемлема, но часть показателей ниже цели."
+              : "Цена невыгодна — ключевые показатели критичны.";
+            return (
+              <div className="rounded-lg border p-4 flex items-start gap-3" style={{ background: vBg, borderColor: vBorder }}>
+                <Icon name={score === 3 ? "CheckCircle2" : score === 2 ? "AlertTriangle" : "XCircle"} size={16} className={vColor} />
+                <div className="flex-1">
+                  <p className={`text-sm font-semibold ${vColor}`}>{score === 3 ? "Цена выгодна" : score === 2 ? "Приемлемо" : "Невыгодно"}</p>
+                  <p className="text-xs text-muted-foreground mt-0.5">{vText}</p>
+                </div>
+                <div className="flex items-center gap-1.5 shrink-0">
+                  {[{ ok: profitOk, label: "Прибыль" }, { ok: marginOk, label: "Маржа ≥15%" }, { ok: roiOk, label: "ROI ≥20%" }].map((c) => (
+                    <span key={c.label} className={`text-[10px] px-2 py-0.5 rounded border font-medium ${c.ok ? "text-green-400 border-green-400/25 bg-green-400/10" : "text-red-400 border-red-400/25 bg-red-400/10"}`}>
+                      {c.ok ? "✓" : "✗"} {c.label}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            );
+          })()}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function Index() {
   const [activeSection, setActiveSection] = useState<Section>("analytics");
   const [platform, setPlatform] = useState<Platform>("all");
   const [notifOpen, setNotifOpen] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(true);
 
-  // Pricing calculator state
-  const [calcProductId, setCalcProductId] = useState<number>(1);
-  const [calcPrice, setCalcPrice] = useState<string>("3990");
+  // Dialog state
+  const [calcDialogProduct, setCalcDialogProduct] = useState<typeof CALC_PRODUCTS[0] | null>(null);
+  const [calcDialogInitPrice, setCalcDialogInitPrice] = useState<number | undefined>(undefined);
 
-  const calcProduct = CALC_PRODUCTS.find((p) => p.id === calcProductId) ?? CALC_PRODUCTS[0];
-  const calcPriceNum = parseFloat(calcPrice.replace(/\s/g, "")) || 0;
-  const currentMetrics = useMemo(() => calcMetrics(calcProduct, calcProduct.currentPrice), [calcProduct]);
-  const newMetrics = useMemo(() => calcMetrics(calcProduct, calcPriceNum), [calcProduct, calcPriceNum]);
+  function openCalcDialog(productName: string, initPrice?: number) {
+    const found = CALC_PRODUCTS.find((p) => p.name === productName);
+    if (found) {
+      setCalcDialogProduct(found);
+      setCalcDialogInitPrice(initPrice ?? found.currentPrice);
+    }
+  }
+
+
 
   const d = DATA[platform];
   const maxChart = Math.max(...d.chart);
@@ -298,6 +487,15 @@ export default function Index() {
 
   return (
     <div className="flex h-screen bg-background overflow-hidden font-['IBM_Plex_Sans',sans-serif]">
+      {/* Price calc dialog */}
+      {calcDialogProduct && (
+        <PriceCalcDialog
+          product={calcDialogProduct}
+          initialPrice={calcDialogInitPrice}
+          onClose={() => setCalcDialogProduct(null)}
+        />
+      )}
+
       {/* Sidebar */}
       <aside
         className={`flex flex-col border-r border-border transition-all duration-300 ${sidebarOpen ? "w-56" : "w-14"} shrink-0`}
@@ -700,10 +898,10 @@ export default function Index() {
                 {d.pricing.map((r) => (
                   <div key={r.name} className="rounded-lg border border-border p-4" style={{ background: "hsl(220,14%,9%)" }}>
                     <div className="flex items-start justify-between gap-4">
-                      <div>
+                      <div className="flex-1 min-w-0">
                         <div className="flex items-center gap-2 mb-1">
                           <p className="text-sm font-medium text-foreground">{r.name}</p>
-                          <span className={`text-xs px-1.5 py-0.5 rounded font-medium ${r.platform === "Ozon" ? "text-blue-400 bg-blue-400/10" : "text-pink-400 bg-pink-400/10"}`}>{r.platform}</span>
+                          <span className={`text-xs px-1.5 py-0.5 rounded font-medium shrink-0 ${r.platform === "Ozon" ? "text-blue-400 bg-blue-400/10" : "text-pink-400 bg-pink-400/10"}`}>{r.platform}</span>
                         </div>
                         <p className="text-xs text-muted-foreground">{r.reason}</p>
                       </div>
@@ -717,17 +915,18 @@ export default function Index() {
                           <p className="text-xs text-muted-foreground">Рекомендуемая</p>
                           <p className={`text-sm font-mono-num ${r.action === "повысить" ? "text-green-400" : r.action === "снизить" ? "text-red-400" : "text-muted-foreground"}`}>{r.rec}</p>
                         </div>
+                        <button
+                          className="flex items-center gap-1.5 text-xs px-3 py-1.5 rounded border border-border hover:border-primary/50 text-muted-foreground hover:text-foreground transition-all"
+                          onClick={() => openCalcDialog(r.name)}
+                        >
+                          <Icon name="BarChart2" size={12} />
+                          Детали
+                        </button>
                         {r.action !== "держать" && (
                           <button
                             className="text-xs px-3 py-1.5 rounded text-white transition-all hover:opacity-80"
                             style={{ background: platformAccent }}
-                            onClick={() => {
-                              const found = CALC_PRODUCTS.find((p) => p.name === r.name);
-                              if (found) {
-                                setCalcProductId(found.id);
-                                setCalcPrice(r.rec.replace(/\s|₽/g, ""));
-                              }
-                            }}
+                            onClick={() => openCalcDialog(r.name, Number(r.rec.replace(/\s|₽/g, "")))}
                           >
                             Рассчитать
                           </button>
@@ -738,219 +937,6 @@ export default function Index() {
                 ))}
               </div>
 
-              {/* ── PRICE CALCULATOR ── */}
-              <div className="rounded-lg border border-border overflow-hidden" style={{ background: "hsl(220,14%,9%)" }}>
-                <div className="flex items-center gap-2 px-5 py-4 border-b border-border">
-                  <Icon name="Calculator" size={15} className="text-primary" />
-                  <h2 className="text-sm font-semibold text-foreground">Предварительный расчёт по цене</h2>
-                </div>
-
-                {/* Product selector + price input */}
-                <div className="px-5 py-4 border-b border-border space-y-4">
-                  <div>
-                    <label className="text-xs text-muted-foreground block mb-1.5">Товар</label>
-                    <select
-                      value={calcProductId}
-                      onChange={(e) => {
-                        const id = Number(e.target.value);
-                        setCalcProductId(id);
-                        const found = CALC_PRODUCTS.find((p) => p.id === id);
-                        if (found) setCalcPrice(String(found.currentPrice));
-                      }}
-                      className="w-full rounded border border-border px-3 py-2 text-sm text-foreground outline-none focus:border-primary/50 transition-colors appearance-none cursor-pointer"
-                      style={{ background: "hsl(220,16%,6%)" }}
-                    >
-                      {CALC_PRODUCTS.map((p) => (
-                        <option key={p.id} value={p.id}>{p.name} · {p.platform} · {p.sku}</option>
-                      ))}
-                    </select>
-                  </div>
-
-                  {/* Slider + input */}
-                  <div>
-                    <div className="flex items-center justify-between mb-2">
-                      <label className="text-xs text-muted-foreground">Цена продажи</label>
-                      <div className="flex items-center gap-2">
-                        <input
-                          type="number"
-                          min={calcProduct.costPrice}
-                          max={calcProduct.currentPrice * 2}
-                          value={calcPrice}
-                          onChange={(e) => setCalcPrice(e.target.value)}
-                          className="w-28 rounded border border-border px-3 py-1.5 text-sm font-mono-num text-foreground outline-none focus:border-primary/50 transition-colors text-right"
-                          style={{ background: "hsl(220,16%,6%)" }}
-                        />
-                        <span className="text-sm text-muted-foreground">₽</span>
-                      </div>
-                    </div>
-
-                    {/* Custom styled range */}
-                    <div className="relative">
-                      <input
-                        type="range"
-                        min={calcProduct.costPrice}
-                        max={calcProduct.currentPrice * 2}
-                        step={10}
-                        value={calcPriceNum || calcProduct.currentPrice}
-                        onChange={(e) => setCalcPrice(e.target.value)}
-                        className="w-full h-1.5 rounded-full appearance-none cursor-pointer"
-                        style={{
-                          background: (() => {
-                            const min = calcProduct.costPrice;
-                            const max = calcProduct.currentPrice * 2;
-                            const pct = Math.min(100, Math.max(0, ((calcPriceNum - min) / (max - min)) * 100));
-                            return `linear-gradient(to right, ${platformAccent} ${pct}%, hsl(220,12%,20%) ${pct}%)`;
-                          })(),
-                        }}
-                      />
-                      {/* Tick marks */}
-                      <div className="flex justify-between mt-1.5 text-[10px] text-muted-foreground font-mono-num">
-                        <span>{calcProduct.costPrice} ₽<br/><span className="opacity-60">себест.</span></span>
-                        <span className="text-center">{calcProduct.currentPrice} ₽<br/><span className="opacity-60">текущая</span></span>
-                        <span className="text-right">{calcProduct.currentPrice * 2} ₽<br/><span className="opacity-60">макс.</span></span>
-                      </div>
-                    </div>
-
-                    {/* Delta badge */}
-                    {calcPriceNum !== calcProduct.currentPrice && calcPriceNum > 0 && (
-                      <div className="mt-2 flex items-center gap-2">
-                        <span className="text-xs text-muted-foreground">Изменение цены:</span>
-                        <span className={`text-xs font-mono-num font-semibold ${calcPriceNum > calcProduct.currentPrice ? "text-green-400" : "text-red-400"}`}>
-                          {calcPriceNum > calcProduct.currentPrice ? "+" : ""}
-                          {(calcPriceNum - calcProduct.currentPrice).toFixed(0)} ₽
-                          ({calcPriceNum > calcProduct.currentPrice ? "+" : ""}
-                          {(((calcPriceNum - calcProduct.currentPrice) / calcProduct.currentPrice) * 100).toFixed(1)}%)
-                        </span>
-                      </div>
-                    )}
-                  </div>
-                </div>
-
-                {/* Cost breakdown */}
-                <div className="px-5 py-4 border-b border-border">
-                  <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-3">Структура затрат</p>
-                  <div className="space-y-2">
-                    {[
-                      { label: "Себестоимость товара", value: calcProduct.costPrice, note: "фиксированная" },
-                      { label: `Комиссия площадки (${calcProduct.commissionPct}%)`, value: newMetrics.commission, note: `${calcProduct.platform}` },
-                      { label: "Логистика и доставка", value: calcProduct.logisticsCost, note: "за единицу" },
-                      { label: "Хранение на складе", value: calcProduct.storageCostPerUnit, note: "за единицу / мес" },
-                      { label: "Реклама и продвижение", value: calcProduct.adsCostPerUnit, note: "за единицу" },
-                      { label: `Возвраты (${calcProduct.returnRatePct}%)`, value: newMetrics.returns, note: "оценка" },
-                    ].map((row) => (
-                      <div key={row.label} className="flex items-center justify-between">
-                        <div className="flex items-center gap-2">
-                          <span className="text-xs text-foreground">{row.label}</span>
-                          <span className="text-[10px] text-muted-foreground">· {row.note}</span>
-                        </div>
-                        <span className="text-xs font-mono-num text-muted-foreground">{row.value.toFixed(0)} ₽</span>
-                      </div>
-                    ))}
-                    <div className="pt-2 border-t border-border flex items-center justify-between">
-                      <span className="text-xs font-semibold text-foreground">Итого затрат</span>
-                      <span className="text-xs font-mono-num font-semibold text-foreground">{newMetrics.totalExpenses.toFixed(0)} ₽</span>
-                    </div>
-                  </div>
-                </div>
-
-                {/* Key metrics comparison */}
-                <div className="px-5 py-4 border-b border-border">
-                  <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-3">Ключевые показатели</p>
-                  <div className="grid grid-cols-4 gap-3">
-                    {[
-                      {
-                        label: "Прибыль с единицы",
-                        current: currentMetrics.profit,
-                        next: newMetrics.profit,
-                        fmt: (v: number) => `${v.toFixed(0)} ₽`,
-                        higherBetter: true,
-                      },
-                      {
-                        label: "Маржа",
-                        current: currentMetrics.margin,
-                        next: newMetrics.margin,
-                        fmt: (v: number) => `${v.toFixed(1)}%`,
-                        higherBetter: true,
-                      },
-                      {
-                        label: "ROI",
-                        current: currentMetrics.roi,
-                        next: newMetrics.roi,
-                        fmt: (v: number) => `${v.toFixed(1)}%`,
-                        higherBetter: true,
-                      },
-                      {
-                        label: "Точка безубыточности",
-                        current: currentMetrics.breakeven,
-                        next: newMetrics.breakeven,
-                        fmt: (v: number) => `${v.toFixed(0)} ₽`,
-                        higherBetter: false,
-                      },
-                    ].map((m) => {
-                      const delta = m.next - m.current;
-                      const better = m.higherBetter ? delta > 0 : delta < 0;
-                      const worse  = m.higherBetter ? delta < 0 : delta > 0;
-                      return (
-                        <div key={m.label} className="rounded-lg p-3" style={{ background: "hsl(220,16%,6%)" }}>
-                          <p className="text-[10px] text-muted-foreground mb-1.5 leading-tight">{m.label}</p>
-                          <p className="text-xs text-muted-foreground font-mono-num line-through mb-0.5">{m.fmt(m.current)}</p>
-                          <p className={`text-base font-semibold font-mono-num ${better ? "text-green-400" : worse ? "text-red-400" : "text-foreground"}`}>
-                            {m.fmt(m.next)}
-                          </p>
-                          {delta !== 0 && (
-                            <p className={`text-[10px] font-mono-num mt-1 ${better ? "text-green-400" : "text-red-400"}`}>
-                              {delta > 0 ? "+" : ""}{m.fmt(delta)}
-                            </p>
-                          )}
-                        </div>
-                      );
-                    })}
-                  </div>
-                </div>
-
-                {/* Verdict */}
-                <div className="px-5 py-4">
-                  {(() => {
-                    const profitOk = newMetrics.profit > 0;
-                    const marginOk = newMetrics.margin >= 15;
-                    const roiOk    = newMetrics.roi >= 20;
-                    const score    = [profitOk, marginOk, roiOk].filter(Boolean).length;
-                    const verdictColor = score === 3 ? "text-green-400" : score === 2 ? "text-yellow-400" : "text-red-400";
-                    const verdictBg    = score === 3 ? "rgba(74,222,128,0.07)" : score === 2 ? "rgba(250,204,21,0.07)" : "rgba(248,113,113,0.07)";
-                    const verdictBorder= score === 3 ? "rgba(74,222,128,0.2)" : score === 2 ? "rgba(250,204,21,0.2)" : "rgba(248,113,113,0.2)";
-                    const verdictText  = score === 3
-                      ? "Цена оптимальна — прибыль, маржа и ROI в норме. Можно применять."
-                      : score === 2
-                      ? "Цена приемлема, но часть показателей ниже цели. Проверьте риски."
-                      : "Цена невыгодна — один или несколько ключевых показателей критичны.";
-                    return (
-                      <div className="rounded-lg border p-4 flex items-start gap-3" style={{ background: verdictBg, borderColor: verdictBorder }}>
-                        <Icon name={score === 3 ? "CheckCircle2" : score === 2 ? "AlertTriangle" : "XCircle"} size={16} className={verdictColor} />
-                        <div className="flex-1">
-                          <p className={`text-sm font-semibold ${verdictColor}`}>
-                            {score === 3 ? "Цена выгодна" : score === 2 ? "Приемлемо" : "Невыгодно"}
-                          </p>
-                          <p className="text-xs text-muted-foreground mt-0.5">{verdictText}</p>
-                        </div>
-                        <div className="flex items-center gap-1.5 shrink-0">
-                          {[
-                            { ok: profitOk, label: "Прибыль" },
-                            { ok: marginOk, label: "Маржа ≥15%" },
-                            { ok: roiOk,    label: "ROI ≥20%" },
-                          ].map((c) => (
-                            <span
-                              key={c.label}
-                              className={`text-[10px] px-2 py-0.5 rounded border font-medium ${c.ok ? "text-green-400 border-green-400/25 bg-green-400/8" : "text-red-400 border-red-400/25 bg-red-400/8"}`}
-                            >
-                              {c.ok ? "✓" : "✗"} {c.label}
-                            </span>
-                          ))}
-                        </div>
-                      </div>
-                    );
-                  })()}
-                </div>
-              </div>
             </div>
           )}
 
@@ -977,11 +963,12 @@ export default function Index() {
                       <th className="text-right px-4 py-3 text-xs font-medium text-muted-foreground uppercase tracking-wider">Продажи</th>
                       <th className="text-right px-4 py-3 text-xs font-medium text-muted-foreground uppercase tracking-wider">Выручка</th>
                       <th className="text-right px-4 py-3 text-xs font-medium text-muted-foreground uppercase tracking-wider">Остаток</th>
+                      <th className="px-4 py-3" />
                     </tr>
                   </thead>
                   <tbody>
                     {d.products.map((p) => (
-                      <tr key={p.sku} className="border-b border-border last:border-0 hover:bg-secondary/40 transition-colors cursor-pointer">
+                      <tr key={p.sku} className="border-b border-border last:border-0 hover:bg-secondary/40 transition-colors">
                         <td className="px-4 py-3 text-foreground">{p.name}</td>
                         {platform === "all" && (
                           <td className="px-4 py-3">
@@ -995,6 +982,15 @@ export default function Index() {
                           <span className={p.stock === 0 ? "text-red-400" : p.stock < 20 ? "text-yellow-400" : "text-green-400"}>
                             {p.stock === 0 ? "Нет" : p.stock}
                           </span>
+                        </td>
+                        <td className="px-4 py-3 text-right">
+                          <button
+                            onClick={() => openCalcDialog(p.name)}
+                            className="flex items-center gap-1 text-xs px-2.5 py-1 rounded border border-border hover:border-primary/50 text-muted-foreground hover:text-foreground transition-all ml-auto"
+                          >
+                            <Icon name="BarChart2" size={11} />
+                            Детали
+                          </button>
                         </td>
                       </tr>
                     ))}

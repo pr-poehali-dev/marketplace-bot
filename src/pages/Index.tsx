@@ -746,7 +746,7 @@ export default function Index() {
                 </div>
 
                 {/* Product selector + price input */}
-                <div className="px-5 py-4 border-b border-border grid grid-cols-[1fr_auto] gap-4 items-end">
+                <div className="px-5 py-4 border-b border-border space-y-4">
                   <div>
                     <label className="text-xs text-muted-foreground block mb-1.5">Товар</label>
                     <select
@@ -765,16 +765,64 @@ export default function Index() {
                       ))}
                     </select>
                   </div>
+
+                  {/* Slider + input */}
                   <div>
-                    <label className="text-xs text-muted-foreground block mb-1.5">Новая цена продажи, ₽</label>
-                    <input
-                      type="number"
-                      min={0}
-                      value={calcPrice}
-                      onChange={(e) => setCalcPrice(e.target.value)}
-                      className="w-36 rounded border border-border px-3 py-2 text-sm font-mono-num text-foreground outline-none focus:border-primary/50 transition-colors"
-                      style={{ background: "hsl(220,16%,6%)" }}
-                    />
+                    <div className="flex items-center justify-between mb-2">
+                      <label className="text-xs text-muted-foreground">Цена продажи</label>
+                      <div className="flex items-center gap-2">
+                        <input
+                          type="number"
+                          min={calcProduct.costPrice}
+                          max={calcProduct.currentPrice * 2}
+                          value={calcPrice}
+                          onChange={(e) => setCalcPrice(e.target.value)}
+                          className="w-28 rounded border border-border px-3 py-1.5 text-sm font-mono-num text-foreground outline-none focus:border-primary/50 transition-colors text-right"
+                          style={{ background: "hsl(220,16%,6%)" }}
+                        />
+                        <span className="text-sm text-muted-foreground">₽</span>
+                      </div>
+                    </div>
+
+                    {/* Custom styled range */}
+                    <div className="relative">
+                      <input
+                        type="range"
+                        min={calcProduct.costPrice}
+                        max={calcProduct.currentPrice * 2}
+                        step={10}
+                        value={calcPriceNum || calcProduct.currentPrice}
+                        onChange={(e) => setCalcPrice(e.target.value)}
+                        className="w-full h-1.5 rounded-full appearance-none cursor-pointer"
+                        style={{
+                          background: (() => {
+                            const min = calcProduct.costPrice;
+                            const max = calcProduct.currentPrice * 2;
+                            const pct = Math.min(100, Math.max(0, ((calcPriceNum - min) / (max - min)) * 100));
+                            return `linear-gradient(to right, ${platformAccent} ${pct}%, hsl(220,12%,20%) ${pct}%)`;
+                          })(),
+                        }}
+                      />
+                      {/* Tick marks */}
+                      <div className="flex justify-between mt-1.5 text-[10px] text-muted-foreground font-mono-num">
+                        <span>{calcProduct.costPrice} ₽<br/><span className="opacity-60">себест.</span></span>
+                        <span className="text-center">{calcProduct.currentPrice} ₽<br/><span className="opacity-60">текущая</span></span>
+                        <span className="text-right">{calcProduct.currentPrice * 2} ₽<br/><span className="opacity-60">макс.</span></span>
+                      </div>
+                    </div>
+
+                    {/* Delta badge */}
+                    {calcPriceNum !== calcProduct.currentPrice && calcPriceNum > 0 && (
+                      <div className="mt-2 flex items-center gap-2">
+                        <span className="text-xs text-muted-foreground">Изменение цены:</span>
+                        <span className={`text-xs font-mono-num font-semibold ${calcPriceNum > calcProduct.currentPrice ? "text-green-400" : "text-red-400"}`}>
+                          {calcPriceNum > calcProduct.currentPrice ? "+" : ""}
+                          {(calcPriceNum - calcProduct.currentPrice).toFixed(0)} ₽
+                          ({calcPriceNum > calcProduct.currentPrice ? "+" : ""}
+                          {(((calcPriceNum - calcProduct.currentPrice) / calcProduct.currentPrice) * 100).toFixed(1)}%)
+                        </span>
+                      </div>
+                    )}
                   </div>
                 </div>
 

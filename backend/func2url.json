@@ -1,4 +1,6 @@
 {
+  "sync-products": "https://functions.poehali.dev/a86eaec6-1c8a-4660-b821-c9d960c600a2",
+  "integrations": "https://functions.poehali.dev/ed29450a-3acc-4dca-a6a6-646a29edb2ed",
   "prices": "https://functions.poehali.dev/f159ac5b-5ca7-4e79-9af6-c13e84c115a0",
   "auth": "https://functions.poehali.dev/7a6aa94f-05ea-4ac3-aff2-f289544c29b4",
   "products": "https://functions.poehali.dev/3c76d47d-aef4-476e-a827-3f5a8261e881"

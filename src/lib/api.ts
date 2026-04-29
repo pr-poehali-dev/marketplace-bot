@@ -79,15 +79,6 @@ export async function apiGetProducts() {
   return parseResponse(res);
 }
 
-export async function apiSyncProducts(platform: "Ozon" | "WB" | "all" = "all") {
-  const res = await fetch(`${PRODUCTS_URL}?action=sync`, {
-    method: "POST",
-    headers: authHeaders(),
-    body: JSON.stringify({ platform }),
-  });
-  return parseResponse(res);
-}
-
 // ── Prices ───────────────────────────────────────────────────────
 
 export async function apiGetPrices() {
@@ -103,6 +94,37 @@ export async function apiSavePrice(sku: string, price: number) {
     method: "POST",
     headers: authHeaders(),
     body: JSON.stringify({ sku, price }),
+  });
+  return parseResponse(res);
+}
+
+// ── Integrations ─────────────────────────────────────────────────
+
+const INTEGRATIONS_URL = "https://functions.poehali.dev/ed29450a-3acc-4dca-a6a6-646a29edb2ed";
+const SYNC_PRODUCTS_URL = "https://functions.poehali.dev/a86eaec6-1c8a-4660-b821-c9d960c600a2";
+
+export async function apiGetIntegrations() {
+  const res = await fetch(INTEGRATIONS_URL, {
+    method: "GET",
+    headers: authHeaders(),
+  });
+  return parseResponse(res);
+}
+
+export async function apiSaveIntegration(platform: "ozon" | "wb", api_key: string) {
+  const res = await fetch(INTEGRATIONS_URL, {
+    method: "POST",
+    headers: authHeaders(),
+    body: JSON.stringify({ platform, api_key }),
+  });
+  return parseResponse(res);
+}
+
+export async function apiSyncProducts(platform: "ozon" | "wb" | "all" = "all") {
+  const res = await fetch(SYNC_PRODUCTS_URL, {
+    method: "POST",
+    headers: authHeaders(),
+    body: JSON.stringify({ platform }),
   });
   return parseResponse(res);
 }

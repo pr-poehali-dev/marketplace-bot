@@ -1,0 +1,21 @@
+{
+  "tests": [
+    {
+      "name": "POST without auth → 401",
+      "method": "POST",
+      "path": "/",
+      "body": {"platform": "all"},
+      "expectedStatus": 401,
+      "expectedBody": {"error": "string"},
+      "bodyMatcher": "partial"
+    },
+    {
+      "name": "GET method → 405",
+      "method": "GET",
+      "path": "/",
+      "expectedStatus": 405,
+      "expectedBody": {"error": "string"},
+      "bodyMatcher": "partial"
+    }
+  ]
+}

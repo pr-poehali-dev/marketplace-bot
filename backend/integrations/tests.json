@@ -1,0 +1,21 @@
+{
+  "tests": [
+    {
+      "name": "GET without auth → 401",
+      "method": "GET",
+      "path": "/",
+      "expectedStatus": 401,
+      "expectedBody": {"error": "string"},
+      "bodyMatcher": "partial"
+    },
+    {
+      "name": "POST without auth → 401",
+      "method": "POST",
+      "path": "/",
+      "body": {"platform": "ozon", "api_key": "test_key_123"},
+      "expectedStatus": 401,
+      "expectedBody": {"error": "string"},
+      "bodyMatcher": "partial"
+    }
+  ]
+}

@@ -131,6 +131,19 @@ export async function apiVerifyIntegration(platform: "ozon" | "wb", api_key: str
   return parseResponse(res);
 }
 
+// ── Sync Ozon ─────────────────────────────────────────────────────
+
+const SYNC_OZON_URL = "https://functions.poehali.dev/6012000a-4e18-49a7-9787-fc0a61d7d90c";
+
+export async function apiSyncOzon() {
+  const res = await fetch(SYNC_OZON_URL, {
+    method: "POST",
+    headers: authHeaders(),
+    body: JSON.stringify({}),
+  });
+  return parseResponse(res);
+}
+
 export async function apiSyncProducts(platform: "ozon" | "wb" | "all" = "all") {
   const res = await fetch(SYNC_PRODUCTS_URL, {
     method: "POST",

@@ -1,7 +1,7 @@
 import { useState, useMemo, useEffect, useCallback } from "react";
 import Icon from "@/components/ui/icon";
 import { useAuth } from "@/hooks/useAuth";
-import { apiGetProducts, apiGetPrices, apiSavePrice, apiSyncProducts, apiGetRecommendations, apiGetPriceHistory, apiGetRules, apiCreateRule, apiUpdateRule, apiGetIntegration, apiSaveIntegration, apiVerifyIntegration } from "@/lib/api";
+import { apiGetProducts, apiGetPrices, apiSavePrice, apiSyncProducts, apiGetRecommendations, apiGetPriceHistory, apiGetRules, apiCreateRule, apiUpdateRule, apiGetIntegration, apiSaveIntegration, apiVerifyIntegration, apiSyncOzon } from "@/lib/api";
 
 type Section = "sync" | "analytics" | "finance" | "pricing" | "products" | "orders" | "settings";
 type Platform = "all" | "ozon" | "wb";
@@ -715,6 +715,7 @@ export default function Index() {
   const [ozonApiKey, setOzonApiKey] = useState("");
   const [ozonSaving, setOzonSaving] = useState(false);
   const [ozonVerifying, setOzonVerifying] = useState(false);
+  const [ozonSyncing, setOzonSyncing] = useState(false);
   const [ozonStatus, setOzonStatus] = useState<{ ok: boolean; msg: string } | null>(null);
 
   const loadOzonIntegration = useCallback(async () => {
@@ -1958,6 +1959,38 @@ export default function Index() {
                   <p className="text-[10px] text-muted-foreground">
                     Ключи хранятся зашифрованно и привязаны к вашему аккаунту. Найти в кабинете Ozon: Настройки → Ключи API.
                   </p>
+
+                  {/* Кнопка синхронизации (показывается если интеграция настроена) */}
+                  {ozonIntegration?.connected && (
+                    <div className="pt-3 border-t border-border flex items-center justify-between">
+                      <div>
+                        <p className="text-sm font-medium text-foreground">Синхронизировать товары</p>
+                        <p className="text-xs text-muted-foreground mt-0.5">
+                          Загрузить актуальный список товаров из Ozon API
+                        </p>
+                      </div>
+                      <button
+                        disabled={ozonSyncing}
+                        onClick={async () => {
+                          setOzonSyncing(true);
+                          setOzonStatus(null);
+                          const data = await apiSyncOzon();
+                          if (data?.ok) {
+                            setOzonStatus({ ok: true, msg: `Синхронизировано ${data.synced} товаров из Ozon` });
+                            await loadData();
+                          } else {
+                            setOzonStatus({ ok: false, msg: data?.error || "Ошибка синхронизации" });
+                          }
+                          setOzonSyncing(false);
+                        }}
+                        className="flex items-center gap-1.5 text-sm px-4 py-2 rounded text-white transition-all hover:opacity-80 disabled:opacity-50 disabled:cursor-not-allowed shrink-0"
+                        style={{ background: "#005BFF" }}
+                      >
+                        <Icon name="RefreshCw" size={14} className={ozonSyncing ? "animate-spin" : ""} />
+                        {ozonSyncing ? "Загрузка..." : "Синхронизировать"}
+                      </button>
+                    </div>
+                  )}
                 </div>
               </div>
 

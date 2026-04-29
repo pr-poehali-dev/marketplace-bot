@@ -1,7 +1,7 @@
 import { useState, useMemo, useEffect, useCallback } from "react";
 import Icon from "@/components/ui/icon";
 import { useAuth } from "@/hooks/useAuth";
-import { apiGetProducts, apiGetPrices, apiSavePrice, apiSyncProducts, apiGetRecommendations, apiGetPriceHistory, apiGetRules, apiCreateRule, apiUpdateRule } from "@/lib/api";
+import { apiGetProducts, apiGetPrices, apiSavePrice, apiSyncProducts, apiGetRecommendations, apiGetPriceHistory, apiGetRules, apiCreateRule, apiUpdateRule, apiGetIntegration, apiSaveIntegration, apiVerifyIntegration } from "@/lib/api";
 
 type Section = "sync" | "analytics" | "finance" | "pricing" | "products" | "orders" | "settings";
 type Platform = "all" | "ozon" | "wb";
@@ -708,7 +708,26 @@ export default function Index() {
     setRulesLoading(false);
   }, []);
 
-  useEffect(() => { if (activeSection === "settings") loadRules(); }, [activeSection, loadRules]);
+  // Ozon integration form
+  interface OzonIntegration { id: string; client_id: string; api_key_preview: string; updated_at: string; connected: boolean; }
+  const [ozonIntegration, setOzonIntegration] = useState<OzonIntegration | null>(null);
+  const [ozonClientId, setOzonClientId] = useState("");
+  const [ozonApiKey, setOzonApiKey] = useState("");
+  const [ozonSaving, setOzonSaving] = useState(false);
+  const [ozonVerifying, setOzonVerifying] = useState(false);
+  const [ozonStatus, setOzonStatus] = useState<{ ok: boolean; msg: string } | null>(null);
+
+  const loadOzonIntegration = useCallback(async () => {
+    const data = await apiGetIntegration("ozon");
+    if (data?.integration) setOzonIntegration(data.integration);
+  }, []);
+
+  useEffect(() => {
+    if (activeSection === "settings") {
+      loadRules();
+      loadOzonIntegration();
+    }
+  }, [activeSection, loadRules, loadOzonIntegration]);
 
   // Dialog state
   const [calcDialogProduct, setCalcDialogProduct] = useState<typeof CALC_PRODUCTS[0] | null>(null);
@@ -1839,6 +1858,105 @@ export default function Index() {
                   </div>
                   <p className="text-[10px] text-muted-foreground mt-2">
                     {RULE_TYPE_META[newRuleType]?.description}
+                  </p>
+                </div>
+              </div>
+
+              {/* ── Интеграция Ozon ── */}
+              <div className="rounded-lg border border-border overflow-hidden" style={{ background: "hsl(220,14%,9%)" }}>
+                <div className="flex items-center gap-3 px-5 py-4 border-b border-border">
+                  <div className="w-8 h-8 rounded-lg flex items-center justify-center shrink-0" style={{ background: "#005BFF" }}>
+                    <span className="text-white text-[10px] font-bold">OZ</span>
+                  </div>
+                  <div className="flex-1">
+                    <h2 className="text-sm font-semibold text-foreground">Ozon Seller API</h2>
+                    <p className="text-xs text-muted-foreground mt-0.5">
+                      {ozonIntegration?.connected
+                        ? `Подключено · Client-Id: ${ozonIntegration.client_id} · ключ: ${ozonIntegration.api_key_preview}`
+                        : "Не настроено — синхронизация работает в демо-режиме"}
+                    </p>
+                  </div>
+                  {ozonIntegration?.connected && (
+                    <span className="flex items-center gap-1 text-[10px] font-medium text-green-400 bg-green-400/10 border border-green-400/25 px-2 py-0.5 rounded-full">
+                      <Icon name="CheckCircle2" size={10} />
+                      Активно
+                    </span>
+                  )}
+                </div>
+
+                <div className="px-5 py-5 space-y-4">
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <label className="text-xs text-muted-foreground block mb-1.5">Client-Id</label>
+                      <input
+                        type="text"
+                        value={ozonClientId}
+                        onChange={(e) => { setOzonClientId(e.target.value); setOzonStatus(null); }}
+                        placeholder={ozonIntegration?.client_id || "12345678"}
+                        className="w-full rounded border border-border px-3 py-2.5 text-sm text-foreground placeholder:text-muted-foreground outline-none focus:border-blue-500/50 transition-colors"
+                        style={{ background: "hsl(220,16%,6%)" }}
+                      />
+                    </div>
+                    <div>
+                      <label className="text-xs text-muted-foreground block mb-1.5">Api-Key</label>
+                      <input
+                        type="password"
+                        value={ozonApiKey}
+                        onChange={(e) => { setOzonApiKey(e.target.value); setOzonStatus(null); }}
+                        placeholder={ozonIntegration?.api_key_preview || "••••••••"}
+                        className="w-full rounded border border-border px-3 py-2.5 text-sm text-foreground placeholder:text-muted-foreground outline-none focus:border-blue-500/50 transition-colors"
+                        style={{ background: "hsl(220,16%,6%)" }}
+                      />
+                    </div>
+                  </div>
+
+                  {ozonStatus && (
+                    <div className={`flex items-center gap-2 text-xs px-3 py-2.5 rounded-lg border ${ozonStatus.ok ? "text-green-400 bg-green-400/8 border-green-400/25" : "text-red-400 bg-red-400/8 border-red-400/25"}`}>
+                      <Icon name={ozonStatus.ok ? "CheckCircle2" : "XCircle"} size={13} />
+                      {ozonStatus.msg}
+                    </div>
+                  )}
+
+                  <div className="flex items-center gap-2">
+                    <button
+                      disabled={ozonVerifying || !ozonClientId || !ozonApiKey}
+                      onClick={async () => {
+                        setOzonVerifying(true); setOzonStatus(null);
+                        const data = await apiVerifyIntegration("ozon", ozonApiKey, ozonClientId);
+                        setOzonStatus(data?.valid
+                          ? { ok: true, msg: "Подключение успешно — ключи действительны" }
+                          : { ok: false, msg: data?.error || "Проверка не прошла" }
+                        );
+                        setOzonVerifying(false);
+                      }}
+                      className="flex items-center gap-1.5 text-sm px-4 py-2 rounded border border-border hover:border-primary/50 text-muted-foreground hover:text-foreground transition-all disabled:opacity-40 disabled:cursor-not-allowed"
+                    >
+                      {ozonVerifying ? <Icon name="Loader2" size={14} className="animate-spin" /> : <Icon name="Plug" size={14} />}
+                      Проверить
+                    </button>
+                    <button
+                      disabled={ozonSaving || !ozonClientId || !ozonApiKey}
+                      onClick={async () => {
+                        setOzonSaving(true); setOzonStatus(null);
+                        const data = await apiSaveIntegration("ozon", ozonApiKey, ozonClientId);
+                        if (data?.ok) {
+                          setOzonStatus({ ok: true, msg: "Интеграция сохранена" });
+                          setOzonIntegration(data.integration);
+                          setOzonClientId(""); setOzonApiKey("");
+                        } else {
+                          setOzonStatus({ ok: false, msg: data?.error || "Ошибка сохранения" });
+                        }
+                        setOzonSaving(false);
+                      }}
+                      className="flex items-center gap-1.5 text-sm px-4 py-2 rounded text-white transition-all hover:opacity-80 disabled:opacity-40 disabled:cursor-not-allowed"
+                      style={{ background: "#005BFF" }}
+                    >
+                      {ozonSaving ? <Icon name="Loader2" size={14} className="animate-spin" /> : <Icon name="Save" size={14} />}
+                      Сохранить
+                    </button>
+                  </div>
+                  <p className="text-[10px] text-muted-foreground">
+                    Ключи хранятся зашифрованно и привязаны к вашему аккаунту. Найти в кабинете Ozon: Настройки → Ключи API.
                   </p>
                 </div>
               </div>

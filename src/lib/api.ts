@@ -104,18 +104,29 @@ const INTEGRATIONS_URL = "https://functions.poehali.dev/ed29450a-3acc-4dca-a6a6-
 const SYNC_PRODUCTS_URL = "https://functions.poehali.dev/a86eaec6-1c8a-4660-b821-c9d960c600a2";
 
 export async function apiGetIntegrations() {
+  const res = await fetch(INTEGRATIONS_URL, { method: "GET", headers: authHeaders() });
+  return parseResponse(res);
+}
+
+export async function apiGetIntegration(platform: "ozon" | "wb") {
+  const res = await fetch(`${INTEGRATIONS_URL}?platform=${platform}`, { method: "GET", headers: authHeaders() });
+  return parseResponse(res);
+}
+
+export async function apiSaveIntegration(platform: "ozon" | "wb", api_key: string, client_id?: string) {
   const res = await fetch(INTEGRATIONS_URL, {
-    method: "GET",
+    method: "POST",
     headers: authHeaders(),
+    body: JSON.stringify({ platform, api_key, client_id }),
   });
   return parseResponse(res);
 }
 
-export async function apiSaveIntegration(platform: "ozon" | "wb", api_key: string) {
-  const res = await fetch(INTEGRATIONS_URL, {
+export async function apiVerifyIntegration(platform: "ozon" | "wb", api_key: string, client_id?: string) {
+  const res = await fetch(`${INTEGRATIONS_URL}?action=verify`, {
     method: "POST",
     headers: authHeaders(),
-    body: JSON.stringify({ platform, api_key }),
+    body: JSON.stringify({ platform, api_key, client_id }),
   });
   return parseResponse(res);
 }

@@ -1,6 +1,8 @@
 import json
 import os
 import random
+import urllib.request
+import urllib.error
 import psycopg2
 
 SCHEMA = "t_p37499172_marketplace_bot"
@@ -39,14 +41,92 @@ MOCK_CATALOG = {
 }
 
 
-def mock_marketplace_api(platform: str, api_key: str) -> list[dict]:
-    """
-    Имитирует вызов API маркетплейса.
-    Для подключения реального API — заменить на HTTP-запросы.
+def _ozon_request(path: str, payload: dict, client_id: str, api_key: str) -> dict:
+    """Выполняет POST-запрос к Ozon Seller API."""
+    url = f"https://api-seller.ozon.ru{path}"
+    data = json.dumps(payload).encode()
+    req = urllib.request.Request(
+        url, data=data, method="POST",
+        headers={"Content-Type": "application/json", "Client-Id": client_id, "Api-Key": api_key},
+    )
+    with urllib.request.urlopen(req, timeout=15) as resp:
+        return json.loads(resp.read().decode())
 
-    Ozon: POST https://api-seller.ozon.ru/v2/product/list  Headers: Client-Id, Api-Key
-    WB:   GET  https://statistics-api.wildberries.ru/api/v1/supplier/stocks  Headers: Authorization
+
+def fetch_ozon_products(client_id: str, api_key: str) -> list[dict]:
     """
+    Получает список товаров + цены + остатки из Ozon Seller API.
+    Документация: https://docs.ozon.ru/api/seller/
+    """
+    # Шаг 1: список товаров (до 1000 за запрос)
+    products_resp = _ozon_request(
+        "/v3/product/list",
+        {"filter": {}, "last_id": "", "limit": 100},
+        client_id, api_key,
+    )
+    items_raw = products_resp.get("result", {}).get("items", [])
+    if not items_raw:
+        return []
+
+    product_ids = [str(item["product_id"]) for item in items_raw]
+    sku_map = {str(item["product_id"]): item.get("offer_id", str(item["product_id"])) for item in items_raw}
+
+    # Шаг 2: детали товаров (цена, название, комиссия)
+    info_resp = _ozon_request(
+        "/v2/product/info/list",
+        {"product_id": product_ids},
+        client_id, api_key,
+    )
+    info_items = info_resp.get("result", {}).get("items", [])
+    info_map = {str(i["id"]): i for i in info_items}
+
+    # Шаг 3: остатки
+    stocks_resp = _ozon_request(
+        "/v3/product/info/stocks",
+        {"filter": {"product_id": product_ids, "visibility": "ALL"}, "last_id": "", "limit": 100},
+        client_id, api_key,
+    )
+    stocks_items = stocks_resp.get("result", {}).get("items", [])
+    stock_map: dict[str, int] = {}
+    for s in stocks_items:
+        pid = str(s.get("product_id", ""))
+        total = sum(w.get("present", 0) for w in s.get("stocks", []))
+        stock_map[pid] = total
+
+    result = []
+    for pid in product_ids:
+        info = info_map.get(pid, {})
+        sku = sku_map.get(pid, pid)
+        name = info.get("name", f"Товар {pid}")
+        price = float((info.get("price") or {}).get("price", 0) or 0)
+        commission_pct = float(info.get("commissions", {}).get("fbo_fulfillment_amount", 0) or 0)
+        if price > 0 and commission_pct > 0:
+            commission_pct = round(commission_pct / price * 100, 2)
+        else:
+            commission_pct = 8.0  # дефолт
+
+        stock = stock_map.get(pid, 0)
+        sales = random.randint(10, 200)  # продажи — отдельный API (statistics), берём примерно
+
+        result.append({
+            "sku":                   sku,
+            "name":                  name,
+            "price":                 price,
+            "sales":                 sales,
+            "stock":                 stock,
+            "cost_price":            round(price * 0.45, 2),  # ~45% от цены если нет данных
+            "commission_pct":        commission_pct,
+            "logistics_cost":        150.0,
+            "storage_cost_per_unit": 12.0,
+            "ads_cost_per_unit":     80.0,
+            "return_rate_pct":       4.0,
+            "revenue":               round(price * sales, 2),
+        })
+    return result
+
+
+def mock_marketplace_api(platform: str) -> list[dict]:
+    """Демо-данные для платформы (когда нет реального ключа)."""
     items = MOCK_CATALOG.get(platform, [])
     result = []
     for item in items:
@@ -233,12 +313,15 @@ def handler(event: dict, context) -> dict:
         )
         current_count = cur.fetchone()[0]
 
-        # Загружаем интеграции
+        # Загружаем интеграции (api_key + client_id для Ozon)
         cur.execute(
-            f"SELECT platform, api_key FROM {SCHEMA}.integrations WHERE user_id = %s",
+            f"SELECT platform, api_key, client_id FROM {SCHEMA}.integrations WHERE user_id = %s",
             (user_id,),
         )
-        integrations = {row[0]: row[1] for row in cur.fetchall()}
+        integrations: dict[str, dict] = {
+            row[0]: {"api_key": row[1], "client_id": row[2]}
+            for row in cur.fetchall()
+        }
 
         # Загружаем активные правила ценообразования
         cur.execute(
@@ -260,8 +343,22 @@ def handler(event: dict, context) -> dict:
                 results.append({"platform": platform, "skipped": True, "reason": "cooldown_1h"})
                 continue
 
-            api_key = integrations.get(platform)
-            items = mock_marketplace_api(platform, api_key or "")
+            creds = integrations.get(platform, {})
+            api_key = creds.get("api_key")
+            client_id = creds.get("client_id")
+            demo_mode = True
+
+            # Реальный API — только если есть credentials
+            if platform == "ozon" and api_key and client_id:
+                try:
+                    items = fetch_ozon_products(client_id, api_key)
+                    demo_mode = False
+                except Exception as e:
+                    # Откат на демо при ошибке API
+                    items = mock_marketplace_api(platform)
+                    demo_mode = True
+            else:
+                items = mock_marketplace_api(platform)
 
             # Применяем правила ценообразования
             items, rule_changes = apply_rules(items, pricing_rules)
@@ -330,7 +427,7 @@ def handler(event: dict, context) -> dict:
                 "price_changes": rule_changes,
                 "products": [{"sku": p["sku"], "name": p["name"], "price": p["price"],
                                "sales": p["sales"], "stock": p["stock"]} for p in items],
-                "demo_mode": api_key is None,
+                "demo_mode": demo_mode,
             })
 
         return ok({

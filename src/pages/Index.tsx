@@ -1,7 +1,7 @@
 import { useState, useMemo, useEffect, useCallback } from "react";
 import Icon from "@/components/ui/icon";
 import { useAuth } from "@/hooks/useAuth";
-import { apiGetProducts, apiGetPrices, apiSavePrice, apiSyncProducts } from "@/lib/api";
+import { apiGetProducts, apiGetPrices, apiSavePrice, apiSyncProducts, apiGetRecommendations } from "@/lib/api";
 
 type Section = "sync" | "analytics" | "finance" | "pricing" | "products" | "orders" | "settings";
 type Platform = "all" | "ozon" | "wb";
@@ -482,6 +482,18 @@ function PriceCalcDialog({
   );
 }
 
+interface Recommendation {
+  sku: string;
+  name: string;
+  platform: string;
+  action: "increase" | "decrease" | "keep";
+  recommended_price: number;
+  current_price: number;
+  current_margin: number;
+  expected_margin: number;
+  reason: string;
+}
+
 interface DBProduct {
   sku: string;
   name: string;
@@ -536,10 +548,14 @@ export default function Index() {
   const [calcDialogInitPrice, setCalcDialogInitPrice] = useState<number | undefined>(undefined);
   // sku → applied price (local + synced from DB)
   const [appliedPrices, setAppliedPrices] = useState<Record<string, number>>({});
+  // sku → recommendation
+  const [recommendations, setRecommendations] = useState<Record<string, Recommendation>>({});
 
-  // Load products + prices from DB
+  // Load products + prices + recommendations from DB
   const loadData = useCallback(async () => {
-    const [prodData, priceData] = await Promise.all([apiGetProducts(), apiGetPrices()]);
+    const [prodData, priceData, recData] = await Promise.all([
+      apiGetProducts(), apiGetPrices(), apiGetRecommendations(),
+    ]);
     if (prodData?.products) {
       setDbProducts(prodData.products);
       // sync_log
@@ -559,6 +575,13 @@ export default function Index() {
         mapped[sku] = (val as { price: number }).price;
       }
       setAppliedPrices(mapped);
+    }
+    if (recData?.recommendations) {
+      const mapped: Record<string, Recommendation> = {};
+      for (const rec of recData.recommendations as Recommendation[]) {
+        mapped[rec.sku] = rec;
+      }
+      setRecommendations(mapped);
     }
     setDbLoaded(true);
   }, []);
@@ -582,7 +605,10 @@ export default function Index() {
 
   async function applyPrice(price: number) {
     if (!calcDialogProduct) return;
-    const sku = calcDialogProduct.sku;
+    await applyPriceBySku(calcDialogProduct.sku, price);
+  }
+
+  async function applyPriceBySku(sku: string, price: number) {
     setAppliedPrices((prev) => ({ ...prev, [sku]: price }));
     await apiSavePrice(sku, price);
   }
@@ -1141,6 +1167,7 @@ export default function Index() {
                       <th className="text-right px-4 py-3 text-xs font-medium text-muted-foreground uppercase tracking-wider">Прибыль</th>
                       <th className="text-right px-4 py-3 text-xs font-medium text-muted-foreground uppercase tracking-wider">Маржа</th>
                       <th className="text-right px-4 py-3 text-xs font-medium text-muted-foreground uppercase tracking-wider">Остаток</th>
+                      <th className="text-left px-4 py-3 text-xs font-medium text-muted-foreground uppercase tracking-wider">Рекомендация</th>
                       <th className="px-4 py-3" />
                     </tr>
                   </thead>
@@ -1168,6 +1195,12 @@ export default function Index() {
                         const profit = appliedPrice - p.cost_price - commission - p.logistics_cost;
                         const margin = appliedPrice > 0 ? (profit / appliedPrice) * 100 : 0;
                         const profitColor = profit > 0 ? "text-green-400" : profit < 0 ? "text-red-400" : "text-muted-foreground";
+                        const rec = recommendations[p.sku];
+                        const recColor = rec?.action === "increase"
+                          ? { text: "text-green-400", bg: "bg-green-400/10", border: "border-green-400/25", icon: "TrendingUp" }
+                          : rec?.action === "decrease"
+                          ? { text: "text-yellow-400", bg: "bg-yellow-400/10", border: "border-yellow-400/25", icon: "TrendingDown" }
+                          : { text: "text-muted-foreground", bg: "bg-secondary", border: "border-border", icon: "Minus" };
                         return (
                           <tr key={p.sku} className="border-b border-border last:border-0 hover:bg-secondary/40 transition-colors">
                             <td className="px-4 py-3 text-foreground">{p.name}</td>
@@ -1208,6 +1241,31 @@ export default function Index() {
                               <span className={p.stock === 0 ? "text-red-400" : p.stock < 20 ? "text-yellow-400" : "text-green-400"}>
                                 {p.stock === 0 ? "Нет" : p.stock}
                               </span>
+                            </td>
+                            {/* Рекомендация */}
+                            <td className="px-4 py-3 min-w-[200px]">
+                              {rec && rec.action !== "keep" ? (
+                                <div className={`flex items-start gap-2 rounded-lg border px-3 py-2 ${recColor.bg} ${recColor.border}`}>
+                                  <Icon name={recColor.icon} fallback="TrendingUp" size={13} className={`${recColor.text} shrink-0 mt-0.5`} />
+                                  <div className="flex-1 min-w-0">
+                                    <p className={`text-[11px] font-medium ${recColor.text} leading-tight mb-1`}>
+                                      {rec.recommended_price.toLocaleString("ru-RU")} ₽
+                                      <span className="text-muted-foreground font-normal ml-1">
+                                        → маржа {rec.expected_margin}%
+                                      </span>
+                                    </p>
+                                    <p className="text-[10px] text-muted-foreground leading-snug line-clamp-2">{rec.reason}</p>
+                                    <button
+                                      onClick={() => applyPriceBySku(p.sku, rec.recommended_price)}
+                                      className={`mt-1.5 text-[10px] px-2 py-0.5 rounded border font-medium transition-all hover:opacity-80 ${recColor.text} ${recColor.border} ${recColor.bg}`}
+                                    >
+                                      Применить рекомендацию
+                                    </button>
+                                  </div>
+                                </div>
+                              ) : (
+                                <span className="text-[11px] text-muted-foreground">—</span>
+                              )}
                             </td>
                             <td className="px-4 py-3 text-right">
                               <button
@@ -1282,6 +1340,7 @@ export default function Index() {
                               {p.stock === 0 ? "Нет" : p.stock}
                             </span>
                           </td>
+                          <td className="px-4 py-3"><span className="text-[11px] text-muted-foreground">Синхронизируйте для рекомендаций</span></td>
                           <td className="px-4 py-3 text-right">
                             <button
                               onClick={() => openCalcDialog(p.name)}
@@ -1297,7 +1356,7 @@ export default function Index() {
                     {/* Empty state after sync */}
                     {dbLoaded && dbProducts.length === 0 && d.products.length === 0 && (
                       <tr>
-                        <td colSpan={10} className="px-4 py-8 text-center text-sm text-muted-foreground">
+                        <td colSpan={11} className="px-4 py-8 text-center text-sm text-muted-foreground">
                           Нажмите «Синхронизировать» чтобы загрузить товары
                         </td>
                       </tr>

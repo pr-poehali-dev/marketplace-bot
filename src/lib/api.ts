@@ -128,3 +128,15 @@ export async function apiSyncProducts(platform: "ozon" | "wb" | "all" = "all") {
   });
   return parseResponse(res);
 }
+
+// ── Price Recommendations ─────────────────────────────────────────
+
+const PRICE_REC_URL = "https://functions.poehali.dev/41ea5b72-9eb3-410a-9a2d-0537e2df1d24";
+
+export async function apiGetRecommendations() {
+  const res = await fetch(PRICE_REC_URL, {
+    method: "GET",
+    headers: authHeaders(),
+  });
+  return parseResponse(res);
+}

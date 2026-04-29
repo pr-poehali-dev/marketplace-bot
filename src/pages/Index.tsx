@@ -1,7 +1,7 @@
 import { useState, useMemo, useEffect, useCallback } from "react";
 import Icon from "@/components/ui/icon";
 import { useAuth } from "@/hooks/useAuth";
-import { apiGetProducts, apiGetPrices, apiSavePrice, apiSyncProducts, apiGetRecommendations, apiGetPriceHistory, apiGetRules, apiCreateRule, apiUpdateRule, apiGetIntegration, apiSaveIntegration, apiVerifyIntegration, apiSyncOzon, apiSyncOzonSales, apiSyncOzonFull, apiPushPriceToOzon, apiSaveWbIntegration, apiGetWbIntegration, apiVerifyWbToken, apiSyncWb, apiSyncWbSales, apiSyncWbFull, apiPushPriceToWb } from "@/lib/api";
+import { apiGetProducts, apiGetPrices, apiSavePrice, apiSyncProducts, apiGetRecommendations, apiGetPriceHistory, apiGetRules, apiCreateRule, apiUpdateRule, apiGetIntegration, apiSaveIntegration, apiVerifyIntegration, apiSyncOzon, apiSyncOzonSales, apiSyncOzonFull, apiPushPriceToOzon, apiSaveWbIntegration, apiGetWbIntegration, apiVerifyWbToken, apiSyncWb, apiSyncWbSales, apiSyncWbFull, apiPushPriceToWb, apiGetApiLogs, apiClearApiLogs } from "@/lib/api";
 
 type Section = "sync" | "analytics" | "finance" | "pricing" | "products" | "orders" | "settings";
 type Platform = "all" | "ozon" | "wb";
@@ -802,6 +802,17 @@ export default function Index() {
   const [wbTableResult, setWbTableResult] = useState<{ ok: boolean; msg: string } | null>(null);
   const [wbTableCooldown, setWbTableCooldown] = useState(false);
 
+  // API Logs
+  type ApiLog = { id: string; platform: string; endpoint: string; status_code: number | null; error: string | null; created_at: string };
+  type ApiLogsStats = { auth_errors: number; rate_limit: number; server_errors: number };
+  const [apiLogs, setApiLogs] = useState<ApiLog[]>([]);
+  const [apiLogsStats, setApiLogsStats] = useState<ApiLogsStats | null>(null);
+  const [apiLogsTotal, setApiLogsTotal] = useState(0);
+  const [apiLogsLoading, setApiLogsLoading] = useState(false);
+  const [apiLogsClearing, setApiLogsClearing] = useState(false);
+  const [apiLogsFilter, setApiLogsFilter] = useState<{ platform: "all" | "ozon" | "wb"; period: number; critical: boolean }>({ platform: "all", period: 30, critical: false });
+  const [settingsTab, setSettingsTab] = useState<"integrations" | "api-logs" | "profile">("integrations");
+
   const loadOzonIntegration = useCallback(async () => {
     const data = await apiGetIntegration("ozon");
     if (data?.integration) {
@@ -826,6 +837,17 @@ export default function Index() {
   const [wbSalesSyncing, setWbSalesSyncing] = useState(false);
   const [wbFullSyncing, setWbFullSyncing] = useState(false);
   const [wbStatus, setWbStatus] = useState<{ ok: boolean; msg: string } | null>(null);
+
+  const loadApiLogs = useCallback(async (filter = apiLogsFilter) => {
+    setApiLogsLoading(true);
+    const data = await apiGetApiLogs({ platform: filter.platform, period: filter.period, critical: filter.critical });
+    if (data?.logs) {
+      setApiLogs(data.logs);
+      setApiLogsTotal(data.total ?? data.logs.length);
+      setApiLogsStats(data.stats ?? null);
+    }
+    setApiLogsLoading(false);
+  }, [apiLogsFilter]);
 
   const loadWbIntegration = useCallback(async () => {
     const data = await apiGetWbIntegration();
@@ -1961,49 +1983,196 @@ export default function Index() {
 
           {/* ── SETTINGS ── */}
           {activeSection === "settings" && (
-            <div className="space-y-4 max-w-xl">
-              {[
-                {
-                  title: "Профиль",
-                  fields: [
-                    { label: "Имя компании", value: "ИП Иванов А.В." },
-                    { label: "Email", value: "seller@example.com" },
-                  ],
-                  toggles: [],
-                },
-                {
-                  title: "Уведомления",
-                  fields: [],
-                  toggles: [
-                    { label: "Изменения цен конкурентов", on: true },
-                    { label: "Новые требования площадок", on: true },
-                    { label: "Критический остаток товаров", on: true },
-                    { label: "Прогноз спроса (еженедельно)", on: false },
-                  ],
-                },
-              ].map((section) => (
-                <div key={section.title} className="rounded-lg border border-border p-5" style={{ background: "hsl(220,14%,9%)" }}>
-                  <h2 className="text-sm font-semibold text-foreground mb-4">{section.title}</h2>
-                  {section.fields.map((f) => (
-                    <div key={f.label} className="mb-3">
-                      <label className="text-xs text-muted-foreground block mb-1.5">{f.label}</label>
-                      <input
-                        defaultValue={f.value}
-                        className="w-full rounded border border-border px-3 py-2 text-sm text-foreground outline-none focus:border-primary/50 transition-colors"
-                        style={{ background: "hsl(220,16%,6%)" }}
-                      />
-                    </div>
-                  ))}
-                  {section.toggles.map((t) => (
-                    <div key={t.label} className="flex items-center justify-between py-2.5 border-b border-border last:border-0">
-                      <span className="text-sm text-foreground">{t.label}</span>
-                      <button className={`w-9 h-5 rounded-full transition-colors relative ${t.on ? "bg-primary" : "bg-secondary"}`}>
-                        <span className={`absolute top-0.5 w-4 h-4 rounded-full bg-white transition-all ${t.on ? "left-4" : "left-0.5"}`} />
+            <div className="space-y-4 max-w-3xl">
+              {/* Вкладки настроек */}
+              <div className="flex items-center gap-1 rounded-lg p-1 border border-border w-fit" style={{ background: "hsl(220,16%,6%)" }}>
+                {([ ["integrations", "Интеграции"], ["api-logs", "Логи API"], ["profile", "Профиль"] ] as const).map(([id, label]) => (
+                  <button
+                    key={id}
+                    onClick={() => { setSettingsTab(id); if (id === "api-logs") loadApiLogs(); }}
+                    className="px-4 py-1.5 rounded text-xs font-medium transition-all"
+                    style={settingsTab === id ? { background: "hsl(210,100%,56%)", color: "#fff" } : { color: "hsl(215,14%,48%)" }}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+
+              {/* Вкладка: Логи API */}
+              {settingsTab === "api-logs" && (() => {
+                const getStatusBadge = (code: number | null) => {
+                  if (!code) return { bg: "hsl(220,12%,16%)", color: "hsl(215,14%,48%)", label: "—" };
+                  if (code === 401 || code === 403) return { bg: "rgba(239,68,68,0.15)", color: "#f87171", label: String(code) };
+                  if (code === 429) return { bg: "rgba(251,191,36,0.15)", color: "#fbbf24", label: "429" };
+                  if (code >= 500) return { bg: "rgba(239,68,68,0.15)", color: "#f87171", label: String(code) };
+                  return { bg: "hsl(220,12%,16%)", color: "hsl(215,14%,60%)", label: String(code) };
+                };
+
+                return (
+                  <div className="space-y-3">
+                    {/* Статистика */}
+                    {apiLogsStats && (
+                      <div className="grid grid-cols-3 gap-3">
+                        <div className="rounded-lg border border-border p-3 flex flex-col gap-1" style={{ background: "hsl(220,14%,9%)" }}>
+                          <span className="text-[10px] text-muted-foreground uppercase tracking-wide">Ошибки авторизации</span>
+                          <span className="text-xl font-bold" style={{ color: apiLogsStats.auth_errors > 0 ? "#f87171" : "#4ade80" }}>{apiLogsStats.auth_errors}</span>
+                        </div>
+                        <div className="rounded-lg border border-border p-3 flex flex-col gap-1" style={{ background: "hsl(220,14%,9%)" }}>
+                          <span className="text-[10px] text-muted-foreground uppercase tracking-wide">Лимит запросов (429)</span>
+                          <span className="text-xl font-bold" style={{ color: apiLogsStats.rate_limit > 0 ? "#fbbf24" : "#4ade80" }}>{apiLogsStats.rate_limit}</span>
+                        </div>
+                        <div className="rounded-lg border border-border p-3 flex flex-col gap-1" style={{ background: "hsl(220,14%,9%)" }}>
+                          <span className="text-[10px] text-muted-foreground uppercase tracking-wide">Ошибки сервера (5xx)</span>
+                          <span className="text-xl font-bold" style={{ color: apiLogsStats.server_errors > 0 ? "#f87171" : "#4ade80" }}>{apiLogsStats.server_errors}</span>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Фильтры */}
+                    <div className="rounded-lg border border-border p-4 flex flex-wrap items-center gap-3" style={{ background: "hsl(220,14%,9%)" }}>
+                      {/* Платформа */}
+                      <div className="flex items-center gap-1 rounded p-0.5 border border-border" style={{ background: "hsl(220,16%,6%)" }}>
+                        {([ ["all", "Все"], ["ozon", "Ozon"], ["wb", "WB"] ] as const).map(([val, lbl]) => (
+                          <button key={val} onClick={() => { const f = { ...apiLogsFilter, platform: val }; setApiLogsFilter(f); loadApiLogs(f); }}
+                            className="px-3 py-1 rounded text-xs font-medium transition-all"
+                            style={apiLogsFilter.platform === val ? { background: "hsl(215,14%,22%)", color: "#e2e8f0" } : { color: "hsl(215,14%,48%)" }}
+                          >{lbl}</button>
+                        ))}
+                      </div>
+
+                      {/* Период */}
+                      <div className="flex items-center gap-1 rounded p-0.5 border border-border" style={{ background: "hsl(220,16%,6%)" }}>
+                        {([1, 7, 30, 90] as const).map((d) => (
+                          <button key={d} onClick={() => { const f = { ...apiLogsFilter, period: d }; setApiLogsFilter(f); loadApiLogs(f); }}
+                            className="px-3 py-1 rounded text-xs font-medium transition-all"
+                            style={apiLogsFilter.period === d ? { background: "hsl(215,14%,22%)", color: "#e2e8f0" } : { color: "hsl(215,14%,48%)" }}
+                          >{d === 1 ? "Сегодня" : `${d}д`}</button>
+                        ))}
+                      </div>
+
+                      {/* Только критичные */}
+                      <button
+                        onClick={() => { const f = { ...apiLogsFilter, critical: !apiLogsFilter.critical }; setApiLogsFilter(f); loadApiLogs(f); }}
+                        className="flex items-center gap-1.5 px-3 py-1.5 rounded border text-xs font-medium transition-all"
+                        style={apiLogsFilter.critical
+                          ? { borderColor: "#f8717140", background: "rgba(239,68,68,0.08)", color: "#f87171" }
+                          : { borderColor: "hsl(220,12%,20%)", color: "hsl(215,14%,48%)", background: "transparent" }
+                        }
+                      >
+                        <Icon name="AlertTriangle" size={12} />
+                        Только критичные
+                      </button>
+
+                      <div className="flex-1" />
+
+                      {/* Кнопка обновить */}
+                      <button onClick={() => loadApiLogs()} disabled={apiLogsLoading}
+                        className="flex items-center gap-1.5 px-3 py-1.5 rounded border border-border text-xs text-muted-foreground hover:text-foreground transition-all disabled:opacity-50"
+                      >
+                        <Icon name="RefreshCw" size={12} className={apiLogsLoading ? "animate-spin" : ""} />
+                        Обновить
+                      </button>
+
+                      {/* Очистить логи */}
+                      <button
+                        onClick={async () => {
+                          if (!confirm("Очистить все логи API? Это действие необратимо.")) return;
+                          setApiLogsClearing(true);
+                          const data = await apiClearApiLogs();
+                          if (data?.ok) { setApiLogs([]); setApiLogsTotal(0); setApiLogsStats(null); }
+                          setApiLogsClearing(false);
+                        }}
+                        disabled={apiLogsClearing || apiLogs.length === 0}
+                        className="flex items-center gap-1.5 px-3 py-1.5 rounded border text-xs font-medium transition-all disabled:opacity-40 disabled:cursor-not-allowed"
+                        style={{ borderColor: "#f8717130", color: "#f87171", background: "rgba(239,68,68,0.06)" }}
+                      >
+                        <Icon name="Trash2" size={12} className={apiLogsClearing ? "animate-pulse" : ""} />
+                        Очистить логи
                       </button>
                     </div>
-                  ))}
-                </div>
-              ))}
+
+                    {/* Таблица логов */}
+                    <div className="rounded-lg border border-border overflow-hidden" style={{ background: "hsl(220,14%,9%)" }}>
+                      <div className="px-4 py-3 border-b border-border flex items-center justify-between">
+                        <span className="text-xs font-semibold text-foreground">
+                          {apiLogsTotal > 0 ? `${apiLogsTotal} записей` : "Нет логов"}
+                        </span>
+                        {apiLogsTotal > apiLogs.length && (
+                          <span className="text-[10px] text-muted-foreground">показано {apiLogs.length}</span>
+                        )}
+                      </div>
+
+                      {apiLogsLoading ? (
+                        <div className="flex items-center justify-center py-12 text-muted-foreground">
+                          <Icon name="RefreshCw" size={16} className="animate-spin mr-2" />
+                          <span className="text-sm">Загрузка логов...</span>
+                        </div>
+                      ) : apiLogs.length === 0 ? (
+                        <div className="flex flex-col items-center justify-center py-12 gap-2 text-muted-foreground">
+                          <Icon name="CheckCircle2" size={28} className="text-green-400 opacity-60" />
+                          <p className="text-sm">Ошибок не найдено</p>
+                          <p className="text-xs">Все API-запросы прошли успешно</p>
+                        </div>
+                      ) : (
+                        <div className="overflow-x-auto">
+                          <table className="w-full text-xs">
+                            <thead>
+                              <tr style={{ background: "hsl(220,16%,6%)", borderBottom: "1px solid hsl(220,12%,16%)" }}>
+                                <th className="text-left px-4 py-2.5 text-muted-foreground font-medium w-24">Платформа</th>
+                                <th className="text-left px-3 py-2.5 text-muted-foreground font-medium">Эндпоинт</th>
+                                <th className="text-center px-3 py-2.5 text-muted-foreground font-medium w-20">Статус</th>
+                                <th className="text-left px-3 py-2.5 text-muted-foreground font-medium">Ошибка</th>
+                                <th className="text-right px-4 py-2.5 text-muted-foreground font-medium w-36">Время</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {apiLogs.map((log, i) => {
+                                const badge = getStatusBadge(log.status_code);
+                                return (
+                                  <tr key={log.id} style={{ borderBottom: i < apiLogs.length - 1 ? "1px solid hsl(220,12%,12%)" : "none" }}
+                                    className="hover:bg-white/[0.02] transition-colors"
+                                  >
+                                    <td className="px-4 py-3">
+                                      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold uppercase tracking-wide"
+                                        style={log.platform === "wb"
+                                          ? { background: "rgba(203,17,171,0.12)", color: "#e879f9" }
+                                          : { background: "rgba(0,91,255,0.12)", color: "#4d9fff" }
+                                        }
+                                      >
+                                        <span className="w-1 h-1 rounded-full" style={{ background: log.platform === "wb" ? "#CB11AB" : "#005BFF" }} />
+                                        {log.platform.toUpperCase()}
+                                      </span>
+                                    </td>
+                                    <td className="px-3 py-3">
+                                      <code className="text-[11px] font-mono text-muted-foreground">{log.endpoint}</code>
+                                    </td>
+                                    <td className="px-3 py-3 text-center">
+                                      <span className="inline-block px-2 py-0.5 rounded text-[10px] font-bold font-mono"
+                                        style={{ background: badge.bg, color: badge.color }}
+                                      >{badge.label}</span>
+                                    </td>
+                                    <td className="px-3 py-3 max-w-xs">
+                                      <span className="text-[11px] text-foreground/70 truncate block" title={log.error ?? ""}>
+                                        {log.error || <span className="text-muted-foreground">—</span>}
+                                      </span>
+                                    </td>
+                                    <td className="px-4 py-3 text-right text-muted-foreground whitespace-nowrap">
+                                      {new Date(log.created_at).toLocaleString("ru-RU", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit", second: "2-digit" })}
+                                    </td>
+                                  </tr>
+                                );
+                              })}
+                            </tbody>
+                          </table>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                );
+              })()}
+
+              {/* Вкладка: Интеграции */}
+              {settingsTab === "integrations" && <div className="space-y-4">
               {/* ── Правила ценообразования ── */}
               <div className="rounded-lg border border-border overflow-hidden" style={{ background: "hsl(220,14%,9%)" }}>
                 <div className="flex items-center justify-between px-5 py-4 border-b border-border">
@@ -2528,10 +2697,26 @@ export default function Index() {
                   )}
                 </div>
               </div>
+              </div>}
 
-              <button className="text-sm px-4 py-2.5 rounded text-white transition-all hover:opacity-80" style={{ background: "hsl(210,100%,56%)" }}>
-                Сохранить изменения
-              </button>
+              {/* Вкладка: Профиль (скрыта) */}
+              {settingsTab === "profile" && (
+                <div className="rounded-lg border border-border p-5" style={{ background: "hsl(220,14%,9%)" }}>
+                  <h2 className="text-sm font-semibold text-foreground mb-4">Профиль</h2>
+                  {[{ label: "Имя компании", value: "ИП Иванов А.В." }, { label: "Email", value: "seller@example.com" }].map((f) => (
+                    <div key={f.label} className="mb-3">
+                      <label className="text-xs text-muted-foreground block mb-1.5">{f.label}</label>
+                      <input defaultValue={f.value}
+                        className="w-full rounded border border-border px-3 py-2 text-sm text-foreground outline-none focus:border-primary/50 transition-colors"
+                        style={{ background: "hsl(220,16%,6%)" }}
+                      />
+                    </div>
+                  ))}
+                  <button className="mt-2 text-sm px-4 py-2 rounded text-white transition-all hover:opacity-80" style={{ background: "hsl(210,100%,56%)" }}>
+                    Сохранить изменения
+                  </button>
+                </div>
+              )}
             </div>
           )}
 

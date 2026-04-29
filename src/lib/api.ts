@@ -1,6 +1,7 @@
 const AUTH_URL = "https://functions.poehali.dev/7a6aa94f-05ea-4ac3-aff2-f289544c29b4";
 const PRODUCTS_URL = "https://functions.poehali.dev/3c76d47d-aef4-476e-a827-3f5a8261e881";
 const PRICES_URL = "https://functions.poehali.dev/f159ac5b-5ca7-4e79-9af6-c13e84c115a0";
+const API_LOGS_URL = "https://functions.poehali.dev/d59ab84b-f418-497f-8055-cc0a858e891a";
 
 function getToken(): string | null {
   return localStorage.getItem("auth_token");
@@ -289,6 +290,34 @@ export async function apiUpdateRule(id: string, patch: { enabled?: boolean; valu
     method: "PATCH",
     headers: authHeaders(),
     body: JSON.stringify(patch),
+  });
+  return parseResponse(res);
+}
+
+// ── API Logs ──────────────────────────────────────────────────────
+
+export async function apiGetApiLogs(params: {
+  platform?: "all" | "ozon" | "wb";
+  period?: number;
+  critical?: boolean;
+  limit?: number;
+}) {
+  const qs = new URLSearchParams();
+  if (params.platform) qs.set("platform", params.platform);
+  if (params.period) qs.set("period", String(params.period));
+  if (params.critical) qs.set("critical", "true");
+  if (params.limit) qs.set("limit", String(params.limit));
+  const res = await fetch(`${API_LOGS_URL}?${qs}`, {
+    method: "GET",
+    headers: authHeaders(),
+  });
+  return parseResponse(res);
+}
+
+export async function apiClearApiLogs() {
+  const res = await fetch(API_LOGS_URL, {
+    method: "DELETE",
+    headers: authHeaders(),
   });
   return parseResponse(res);
 }

@@ -1,0 +1,20 @@
+{
+  "tests": [
+    {
+      "name": "GET без авторизации → 401",
+      "method": "GET",
+      "path": "/",
+      "expectedStatus": 401,
+      "expectedBody": { "error": "Не авторизован" },
+      "bodyMatcher": "partial"
+    },
+    {
+      "name": "DELETE без авторизации → 401",
+      "method": "DELETE",
+      "path": "/",
+      "expectedStatus": 401,
+      "expectedBody": { "error": "Не авторизован" },
+      "bodyMatcher": "partial"
+    }
+  ]
+}

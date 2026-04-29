@@ -280,10 +280,12 @@ function PriceCalcDialog({
   product,
   initialPrice,
   onClose,
+  onApply,
 }: {
   product: typeof CALC_PRODUCTS[0];
   initialPrice?: number;
   onClose: () => void;
+  onApply: (price: number) => void;
 }) {
   const [calcPrice, setCalcPrice] = useState<string>(String(initialPrice ?? product.currentPrice));
   const calcPriceNum = parseFloat(calcPrice) || 0;
@@ -454,6 +456,25 @@ function PriceCalcDialog({
             );
           })()}
         </div>
+
+        {/* Footer actions */}
+        <div className="px-5 py-4 border-t border-border flex items-center justify-between gap-3 sticky bottom-0" style={{ background: "hsl(220,14%,9%)" }}>
+          <button
+            onClick={onClose}
+            className="text-sm px-4 py-2 rounded border border-border text-muted-foreground hover:text-foreground hover:border-primary/40 transition-all"
+          >
+            Отмена
+          </button>
+          <button
+            onClick={() => { onApply(calcPriceNum); onClose(); }}
+            disabled={calcPriceNum <= 0 || calcPriceNum === product.currentPrice}
+            className="flex items-center gap-2 text-sm px-5 py-2 rounded text-white font-medium transition-all disabled:opacity-40 disabled:cursor-not-allowed"
+            style={{ background: product.platform === "Ozon" ? "#005BFF" : "#CB11AB" }}
+          >
+            <Icon name="Check" size={14} />
+            Применить цену · {calcPriceNum > 0 ? calcPriceNum.toLocaleString("ru-RU") : "—"} ₽
+          </button>
+        </div>
       </div>
     </div>
   );
@@ -468,13 +489,20 @@ export default function Index() {
   // Dialog state
   const [calcDialogProduct, setCalcDialogProduct] = useState<typeof CALC_PRODUCTS[0] | null>(null);
   const [calcDialogInitPrice, setCalcDialogInitPrice] = useState<number | undefined>(undefined);
+  // sku → applied price
+  const [appliedPrices, setAppliedPrices] = useState<Record<string, number>>({});
 
   function openCalcDialog(productName: string, initPrice?: number) {
     const found = CALC_PRODUCTS.find((p) => p.name === productName);
     if (found) {
       setCalcDialogProduct(found);
-      setCalcDialogInitPrice(initPrice ?? found.currentPrice);
+      setCalcDialogInitPrice(initPrice ?? appliedPrices[found.sku] ?? found.currentPrice);
     }
+  }
+
+  function applyPrice(price: number) {
+    if (!calcDialogProduct) return;
+    setAppliedPrices((prev) => ({ ...prev, [calcDialogProduct.sku]: price }));
   }
 
 
@@ -493,6 +521,7 @@ export default function Index() {
           product={calcDialogProduct}
           initialPrice={calcDialogInitPrice}
           onClose={() => setCalcDialogProduct(null)}
+          onApply={applyPrice}
         />
       )}
 
@@ -895,20 +924,32 @@ export default function Index() {
 
               {/* Recs */}
               <div className="space-y-3">
-                {d.pricing.map((r) => (
+                {d.pricing.map((r) => {
+                  const calcP = CALC_PRODUCTS.find((cp) => cp.name === r.name);
+                  const appliedPrice = calcP ? appliedPrices[calcP.sku] : undefined;
+                  const isChanged = appliedPrice !== undefined;
+                  return (
                   <div key={r.name} className="rounded-lg border border-border p-4" style={{ background: "hsl(220,14%,9%)" }}>
                     <div className="flex items-start justify-between gap-4">
                       <div className="flex-1 min-w-0">
                         <div className="flex items-center gap-2 mb-1">
                           <p className="text-sm font-medium text-foreground">{r.name}</p>
                           <span className={`text-xs px-1.5 py-0.5 rounded font-medium shrink-0 ${r.platform === "Ozon" ? "text-blue-400 bg-blue-400/10" : "text-pink-400 bg-pink-400/10"}`}>{r.platform}</span>
+                          {isChanged && <span className="text-[10px] px-1.5 py-0.5 rounded font-medium text-emerald-400 bg-emerald-400/10 border border-emerald-400/20">обновлена</span>}
                         </div>
                         <p className="text-xs text-muted-foreground">{r.reason}</p>
                       </div>
                       <div className="flex items-center gap-3 shrink-0">
                         <div className="text-right">
                           <p className="text-xs text-muted-foreground">Текущая</p>
-                          <p className="text-sm font-mono-num text-foreground">{r.current}</p>
+                          {isChanged ? (
+                            <div>
+                              <p className="text-xs text-muted-foreground line-through">{r.current}</p>
+                              <p className="text-sm font-mono-num text-emerald-400">{appliedPrice!.toLocaleString("ru-RU")} ₽</p>
+                            </div>
+                          ) : (
+                            <p className="text-sm font-mono-num text-foreground">{r.current}</p>
+                          )}
                         </div>
                         <Icon name="ArrowRight" size={14} className="text-muted-foreground" />
                         <div className="text-right">
@@ -934,7 +975,8 @@ export default function Index() {
                       </div>
                     </div>
                   </div>
-                ))}
+                  );
+                })}
               </div>
 
             </div>
@@ -960,6 +1002,7 @@ export default function Index() {
                       <th className="text-left px-4 py-3 text-xs font-medium text-muted-foreground uppercase tracking-wider">Товар</th>
                       {platform === "all" && <th className="text-left px-4 py-3 text-xs font-medium text-muted-foreground uppercase tracking-wider">Площадка</th>}
                       <th className="text-left px-4 py-3 text-xs font-medium text-muted-foreground uppercase tracking-wider">SKU</th>
+                      <th className="text-right px-4 py-3 text-xs font-medium text-muted-foreground uppercase tracking-wider">Цена</th>
                       <th className="text-right px-4 py-3 text-xs font-medium text-muted-foreground uppercase tracking-wider">Продажи</th>
                       <th className="text-right px-4 py-3 text-xs font-medium text-muted-foreground uppercase tracking-wider">Выручка</th>
                       <th className="text-right px-4 py-3 text-xs font-medium text-muted-foreground uppercase tracking-wider">Остаток</th>
@@ -967,33 +1010,61 @@ export default function Index() {
                     </tr>
                   </thead>
                   <tbody>
-                    {d.products.map((p) => (
-                      <tr key={p.sku} className="border-b border-border last:border-0 hover:bg-secondary/40 transition-colors">
-                        <td className="px-4 py-3 text-foreground">{p.name}</td>
-                        {platform === "all" && (
-                          <td className="px-4 py-3">
-                            <span className={`text-xs px-2 py-0.5 rounded font-medium ${p.platform === "Ozon" ? "text-blue-400 bg-blue-400/10" : "text-pink-400 bg-pink-400/10"}`}>{p.platform}</span>
+                    {d.products.map((p) => {
+                      const calcP = CALC_PRODUCTS.find((cp) => cp.sku === p.sku);
+                      const basePrice = calcP?.currentPrice ?? 0;
+                      const appliedPrice = calcP ? (appliedPrices[calcP.sku] ?? basePrice) : basePrice;
+                      const isChanged = calcP && appliedPrices[calcP.sku] !== undefined;
+                      const newRevenue = calcP ? (appliedPrice * p.sales) : null;
+                      return (
+                        <tr key={p.sku} className="border-b border-border last:border-0 hover:bg-secondary/40 transition-colors">
+                          <td className="px-4 py-3 text-foreground">{p.name}</td>
+                          {platform === "all" && (
+                            <td className="px-4 py-3">
+                              <span className={`text-xs px-2 py-0.5 rounded font-medium ${p.platform === "Ozon" ? "text-blue-400 bg-blue-400/10" : "text-pink-400 bg-pink-400/10"}`}>{p.platform}</span>
+                            </td>
+                          )}
+                          <td className="px-4 py-3 font-mono-num text-xs text-muted-foreground">{p.sku}</td>
+                          <td className="px-4 py-3 text-right">
+                            <div className="flex items-center justify-end gap-1.5">
+                              {isChanged && (
+                                <span className="text-[10px] px-1.5 py-0.5 rounded font-medium text-emerald-400 bg-emerald-400/10 border border-emerald-400/20">обновлена</span>
+                              )}
+                              <span className={`text-sm font-mono-num font-medium ${isChanged ? "text-emerald-400" : "text-foreground"}`}>
+                                {appliedPrice.toLocaleString("ru-RU")} ₽
+                              </span>
+                            </div>
                           </td>
-                        )}
-                        <td className="px-4 py-3 font-mono-num text-xs text-muted-foreground">{p.sku}</td>
-                        <td className="px-4 py-3 font-mono-num text-right text-foreground">{p.sales}</td>
-                        <td className="px-4 py-3 font-mono-num text-right text-foreground">{p.revenue}</td>
-                        <td className="px-4 py-3 font-mono-num text-right">
-                          <span className={p.stock === 0 ? "text-red-400" : p.stock < 20 ? "text-yellow-400" : "text-green-400"}>
-                            {p.stock === 0 ? "Нет" : p.stock}
-                          </span>
-                        </td>
-                        <td className="px-4 py-3 text-right">
-                          <button
-                            onClick={() => openCalcDialog(p.name)}
-                            className="flex items-center gap-1 text-xs px-2.5 py-1 rounded border border-border hover:border-primary/50 text-muted-foreground hover:text-foreground transition-all ml-auto"
-                          >
-                            <Icon name="BarChart2" size={11} />
-                            Детали
-                          </button>
-                        </td>
-                      </tr>
-                    ))}
+                          <td className="px-4 py-3 font-mono-num text-right text-foreground">{p.sales}</td>
+                          <td className="px-4 py-3 font-mono-num text-right">
+                            {newRevenue !== null ? (
+                              <div className="flex flex-col items-end">
+                                {isChanged && <span className="text-[10px] text-muted-foreground line-through">{p.revenue}</span>}
+                                <span className={isChanged ? "text-emerald-400" : "text-foreground"}>
+                                  {newRevenue.toLocaleString("ru-RU")} ₽
+                                </span>
+                              </div>
+                            ) : (
+                              <span className="text-foreground">{p.revenue}</span>
+                            )}
+                          </td>
+                          <td className="px-4 py-3 font-mono-num text-right">
+                            <span className={p.stock === 0 ? "text-red-400" : p.stock < 20 ? "text-yellow-400" : "text-green-400"}>
+                              {p.stock === 0 ? "Нет" : p.stock}
+                            </span>
+                          </td>
+                          <td className="px-4 py-3 text-right">
+                            <button
+                              onClick={() => openCalcDialog(p.name)}
+                              className="flex items-center gap-1 text-xs px-2.5 py-1 rounded border border-border hover:border-primary/50 text-muted-foreground hover:text-foreground transition-all ml-auto"
+                            >
+                              <Icon name="BarChart2" size={11} />
+                              Детали
+                            </button>
+                          </td>
+                        </tr>
+                      );
+                    })}
                   </tbody>
                 </table>
               </div>

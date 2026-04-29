@@ -144,6 +144,15 @@ export async function apiSyncOzon() {
   return parseResponse(res);
 }
 
+export async function apiSyncOzonSales(days = 30) {
+  const res = await fetch(`${SYNC_OZON_URL}?action=sales`, {
+    method: "POST",
+    headers: authHeaders(),
+    body: JSON.stringify({ days }),
+  });
+  return parseResponse(res);
+}
+
 export async function apiSyncProducts(platform: "ozon" | "wb" | "all" = "all") {
   const res = await fetch(SYNC_PRODUCTS_URL, {
     method: "POST",

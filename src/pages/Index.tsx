@@ -1,7 +1,7 @@
 import { useState, useMemo, useEffect, useCallback } from "react";
 import Icon from "@/components/ui/icon";
 import { useAuth } from "@/hooks/useAuth";
-import { apiGetProducts, apiGetPrices, apiSavePrice, apiSyncProducts, apiGetRecommendations, apiGetPriceHistory, apiGetRules, apiCreateRule, apiUpdateRule, apiGetIntegration, apiSaveIntegration, apiVerifyIntegration, apiSyncOzon } from "@/lib/api";
+import { apiGetProducts, apiGetPrices, apiSavePrice, apiSyncProducts, apiGetRecommendations, apiGetPriceHistory, apiGetRules, apiCreateRule, apiUpdateRule, apiGetIntegration, apiSaveIntegration, apiVerifyIntegration, apiSyncOzon, apiSyncOzonSales } from "@/lib/api";
 
 type Section = "sync" | "analytics" | "finance" | "pricing" | "products" | "orders" | "settings";
 type Platform = "all" | "ozon" | "wb";
@@ -717,6 +717,7 @@ export default function Index() {
   const [ozonSaving, setOzonSaving] = useState(false);
   const [ozonVerifying, setOzonVerifying] = useState(false);
   const [ozonSyncing, setOzonSyncing] = useState(false);
+  const [ozonSalesSyncing, setOzonSalesSyncing] = useState(false);
   const [ozonStatus, setOzonStatus] = useState<{ ok: boolean; msg: string } | null>(null);
 
   const loadOzonIntegration = useCallback(async () => {
@@ -1975,40 +1976,71 @@ export default function Index() {
                     Ключи хранятся зашифрованно и привязаны к вашему аккаунту. Найти в кабинете Ozon: Настройки → Ключи API.
                   </p>
 
-                  {/* Кнопка синхронизации (показывается если интеграция настроена) */}
+                  {/* Кнопки синхронизации (показываются если интеграция настроена) */}
                   {ozonIntegration?.connected && (
-                    <div className="pt-3 border-t border-border flex items-center justify-between">
-                      <div>
-                        <p className="text-sm font-medium text-foreground">Синхронизировать товары</p>
-                        <p className="text-xs text-muted-foreground mt-0.5">
-                          Загрузить актуальный список товаров из Ozon API
-                        </p>
+                    <div className="pt-3 border-t border-border space-y-3">
+                      {/* Товары */}
+                      <div className="flex items-center justify-between gap-3">
+                        <div className="min-w-0">
+                          <p className="text-sm font-medium text-foreground">Товары</p>
+                          <p className="text-xs text-muted-foreground mt-0.5">Список, цены, остатки из Ozon API</p>
+                        </div>
+                        <button
+                          disabled={ozonSyncing}
+                          onClick={async () => {
+                            setOzonSyncing(true);
+                            setOzonStatus(null);
+                            const data = await apiSyncOzon();
+                            if (data?.ok) {
+                              const priceChanges = data.log?.prices_changed ?? 0;
+                              const updated = data.log?.prices_updated ?? data.prices_updated ?? 0;
+                              setOzonStatus({
+                                ok: true,
+                                msg: `Товары: синхронизировано ${data.synced} · цен обновлено: ${updated}${priceChanges > 0 ? ` · изменилось: ${priceChanges}` : ""}`,
+                              });
+                              await loadData();
+                            } else {
+                              setOzonStatus({ ok: false, msg: data?.error || "Ошибка синхронизации товаров" });
+                            }
+                            setOzonSyncing(false);
+                          }}
+                          className="flex items-center gap-1.5 text-sm px-4 py-2 rounded text-white transition-all hover:opacity-80 disabled:opacity-50 disabled:cursor-not-allowed shrink-0"
+                          style={{ background: "#005BFF" }}
+                        >
+                          <Icon name="Package" size={14} className={ozonSyncing ? "animate-pulse" : ""} />
+                          {ozonSyncing ? "Загрузка..." : "Синхронизировать"}
+                        </button>
                       </div>
-                      <button
-                        disabled={ozonSyncing}
-                        onClick={async () => {
-                          setOzonSyncing(true);
-                          setOzonStatus(null);
-                          const data = await apiSyncOzon();
-                          if (data?.ok) {
-                            const priceChanges = data.log?.prices_changed ?? 0;
-                            const updated = data.log?.prices_updated ?? data.prices_updated ?? 0;
-                            setOzonStatus({
-                              ok: true,
-                              msg: `Синхронизировано ${data.synced} товаров · обновлено цен: ${updated}${priceChanges > 0 ? ` · изменилось цен: ${priceChanges}` : ""}`,
-                            });
-                            await loadData();
-                          } else {
-                            setOzonStatus({ ok: false, msg: data?.error || "Ошибка синхронизации" });
-                          }
-                          setOzonSyncing(false);
-                        }}
-                        className="flex items-center gap-1.5 text-sm px-4 py-2 rounded text-white transition-all hover:opacity-80 disabled:opacity-50 disabled:cursor-not-allowed shrink-0"
-                        style={{ background: "#005BFF" }}
-                      >
-                        <Icon name="RefreshCw" size={14} className={ozonSyncing ? "animate-spin" : ""} />
-                        {ozonSyncing ? "Загрузка..." : "Синхронизировать"}
-                      </button>
+
+                      {/* Продажи */}
+                      <div className="flex items-center justify-between gap-3">
+                        <div className="min-w-0">
+                          <p className="text-sm font-medium text-foreground">Продажи за 30 дней</p>
+                          <p className="text-xs text-muted-foreground mt-0.5">FBO-заказы → обновляет кол-во продаж и выручку в товарах</p>
+                        </div>
+                        <button
+                          disabled={ozonSalesSyncing}
+                          onClick={async () => {
+                            setOzonSalesSyncing(true);
+                            setOzonStatus(null);
+                            const data = await apiSyncOzonSales(30);
+                            if (data?.ok) {
+                              setOzonStatus({
+                                ok: true,
+                                msg: `Продажи: ${data.total_orders} заказов · ${data.total_items} единиц · выручка ${Number(data.total_revenue).toLocaleString("ru-RU")} ₽ · обновлено SKU: ${data.skus_updated}`,
+                              });
+                              await loadData();
+                            } else {
+                              setOzonStatus({ ok: false, msg: data?.error || "Ошибка синхронизации продаж" });
+                            }
+                            setOzonSalesSyncing(false);
+                          }}
+                          className="flex items-center gap-1.5 text-sm px-4 py-2 rounded border border-border hover:border-blue-500/50 text-muted-foreground hover:text-foreground transition-all disabled:opacity-50 disabled:cursor-not-allowed shrink-0"
+                        >
+                          <Icon name="TrendingUp" size={14} className={ozonSalesSyncing ? "animate-pulse" : ""} />
+                          {ozonSalesSyncing ? "Загрузка..." : "Синхронизировать"}
+                        </button>
+                      </div>
                     </div>
                   )}
                 </div>

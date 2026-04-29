@@ -3,6 +3,8 @@ import os
 import urllib.request
 import urllib.error
 import psycopg2
+from datetime import datetime, timezone, timedelta
+from collections import defaultdict
 
 SCHEMA = "t_p37499172_marketplace_bot"
 
@@ -275,6 +277,163 @@ def sync_ozon_products(user_id: str, client_id: str, api_key: str, conn) -> dict
         cur.close()
 
 
+# ── Sales sync ────────────────────────────────────────────────────
+
+def fetch_fbo_sales(client_id: str, api_key: str, days: int = 30) -> list[dict]:
+    """
+    POST /v2/posting/fbo/list — список FBO-отправлений за последние N дней.
+
+    Используемые поля ответа:
+      posting_number, status, created_at,
+      products[]: { offer_id, name, quantity, price }
+
+    Учитываем только финальные статусы (не отменённые):
+      delivered, sent_by_seller, awaiting_deliver, ...
+    Исключаем: cancelled, cancelled_from_acceptance
+
+    Пагинация: offset + limit.
+    """
+    now = datetime.now(timezone.utc)
+    since = (now - timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    until = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    SKIP_STATUSES = {"cancelled", "cancelled_from_acceptance", "returned"}
+
+    all_postings: list[dict] = []
+    offset = 0
+    limit  = 1000
+
+    while True:
+        resp = ozon_post(
+            "/v2/posting/fbo/list",
+            {
+                "dir":    "asc",
+                "filter": {
+                    "since":  since,
+                    "to":     until,
+                    "status": "",          # "" = все статусы
+                },
+                "limit":  limit,
+                "offset": offset,
+                "translit":       False,
+                "with": {
+                    "analytics_data":  False,
+                    "financial_data":  False,
+                },
+            },
+            client_id, api_key,
+        )
+        result   = resp.get("result", [])
+        postings = result if isinstance(result, list) else result.get("postings", [])
+
+        # Фильтруем отменённые
+        valid = [p for p in postings if p.get("status") not in SKIP_STATUSES]
+        all_postings.extend(valid)
+
+        if len(postings) < limit:
+            break
+        offset += limit
+
+    return all_postings
+
+
+def aggregate_sales(postings: list[dict]) -> dict[str, dict]:
+    """
+    Агрегирует продажи по offer_id (SKU).
+    Возвращает:
+      { offer_id: { sales: int, revenue: float, orders: int } }
+    """
+    by_sku: dict[str, dict] = defaultdict(lambda: {"sales": 0, "revenue": 0.0, "orders": 0})
+
+    for posting in postings:
+        for product in posting.get("products", []):
+            sku = product.get("offer_id", "")
+            if not sku:
+                continue
+            qty   = int(product.get("quantity", 0))
+            price = float(product.get("price", 0) or 0)
+            by_sku[sku]["sales"]   += qty
+            by_sku[sku]["revenue"] += qty * price
+            by_sku[sku]["orders"]  += 1  # одна строка = одна позиция в заказе
+
+    return dict(by_sku)
+
+
+def sync_ozon_sales(user_id: str, client_id: str, api_key: str, conn, days: int = 30) -> dict:
+    """
+    Синхронизация продаж Ozon за последние N дней.
+
+    1. GET /v2/posting/fbo/list → все отправления
+    2. Агрегирует: sales, revenue по SKU
+    3. Обновляет products: sales, revenue (только товары этого user_id)
+    4. Сохраняет агрегат в sales_aggregates
+    5. Возвращает статистику
+    """
+    cur = conn.cursor()
+    try:
+        now   = datetime.now(timezone.utc)
+        since = now - timedelta(days=days)
+
+        # ── 1. Список FBO-отправлений ─────────────────────────────────
+        postings = fetch_fbo_sales(client_id, api_key, days)
+
+        # ── 2. Агрегация по SKU ───────────────────────────────────────
+        by_sku = aggregate_sales(postings)
+
+        total_orders  = len(postings)
+        total_items   = sum(v["sales"]   for v in by_sku.values())
+        total_revenue = sum(v["revenue"] for v in by_sku.values())
+
+        # ── 3. Обновляем products ─────────────────────────────────────
+        updated_skus: list[str] = []
+
+        for sku, agg in by_sku.items():
+            cur.execute(
+                f"""UPDATE {SCHEMA}.products
+                    SET sales      = %s,
+                        revenue    = %s,
+                        updated_at = NOW()
+                    WHERE user_id = %s
+                      AND sku = %s
+                      AND platform = 'Ozon'
+                    RETURNING sku""",
+                (agg["sales"], round(agg["revenue"], 2), user_id, sku),
+            )
+            row = cur.fetchone()
+            if row:
+                updated_skus.append(row[0])
+
+        # ── 4. Сохраняем агрегат ──────────────────────────────────────
+        cur.execute(
+            f"""INSERT INTO {SCHEMA}.sales_aggregates
+                (user_id, platform, period_start, period_end, total_orders, total_revenue, total_items)
+                VALUES (%s, 'ozon', %s, %s, %s, %s, %s)""",
+            (user_id, since, now, total_orders, round(total_revenue, 2), total_items),
+        )
+
+        conn.commit()
+
+        return {
+            "period_days":    days,
+            "total_orders":   total_orders,
+            "total_items":    total_items,
+            "total_revenue":  round(total_revenue, 2),
+            "skus_updated":   len(updated_skus),
+            "skus_in_orders": len(by_sku),
+            "by_sku": [
+                {
+                    "sku":     sku,
+                    "sales":   agg["sales"],
+                    "revenue": round(agg["revenue"], 2),
+                }
+                for sku, agg in sorted(by_sku.items(), key=lambda x: -x[1]["revenue"])
+            ],
+        }
+
+    finally:
+        cur.close()
+
+
 # ── DB helpers ─────────────────────────────────────────────────────
 
 def get_conn() -> psycopg2.extensions.connection:
@@ -320,25 +479,51 @@ def err(msg, code=400):
 
 def handler(event: dict, context) -> dict:
     """
-    Синхронизация товаров Ozon.
-    POST /sync-ozon   Header: X-Auth-Token
-
-    Шаги: auth → creds → cooldown → list → info → prices → stocks → upsert → log
-    Возвращает: { ok, synced, prices_updated, products[] }
+    Синхронизация данных Ozon.
+    POST /sync-ozon                  — синхронизация товаров (список + цены + остатки)
+    POST /sync-ozon?action=sales     — синхронизация продаж (FBO за 30 дней)
+    Header: X-Auth-Token
     """
     if event.get("httpMethod") == "OPTIONS":
         return {"statusCode": 200, "headers": CORS, "body": ""}
     if event.get("httpMethod") != "POST":
         return err("Только POST", 405)
 
+    qs     = event.get("queryStringParameters") or {}
+    action = qs.get("action", "products")   # "products" | "sales"
+
     conn = get_conn()
-    cur = conn.cursor()
+    cur  = conn.cursor()
     try:
-        user_id, plan = require_auth(cur, event)
+        user_id, _plan = require_auth(cur, event)
         if not user_id:
             return err("Не авторизован", 401)
 
-        # Cooldown 1 час
+        client_id, api_key = get_ozon_creds(cur, user_id)
+        if not client_id or not api_key:
+            return err("Интеграция Ozon не настроена. Добавьте ключи в Настройки → Ozon.", 400)
+
+        # ── action=sales ──────────────────────────────────────────────
+        if action == "sales":
+            body = json.loads(event.get("body") or "{}")
+            days = int(body.get("days", 30))
+            days = max(1, min(days, 90))   # 1–90 дней
+
+            try:
+                stats = sync_ozon_sales(user_id, client_id, api_key, conn, days)
+            except RuntimeError as e:
+                conn.rollback()
+                return err(f"Ошибка Ozon API: {e}", 502)
+
+            return ok({
+                "ok":       True,
+                "action":   "sales",
+                "platform": "ozon",
+                **stats,
+            })
+
+        # ── action=products (по умолчанию) ────────────────────────────
+        # Cooldown 1 час для синхронизации товаров
         cur.execute(
             f"""SELECT started_at FROM {SCHEMA}.sync_log
                 WHERE user_id = %s AND platform = 'ozon' AND status = 'success'
@@ -347,10 +532,6 @@ def handler(event: dict, context) -> dict:
         )
         if cur.fetchone():
             return err("Синхронизация Ozon уже выполнялась менее часа назад", 429)
-
-        client_id, api_key = get_ozon_creds(cur, user_id)
-        if not client_id or not api_key:
-            return err("Интеграция Ozon не настроена. Добавьте ключи в Настройки → Ozon.", 400)
 
         # Лог: старт
         cur.execute(
@@ -370,27 +551,23 @@ def handler(event: dict, context) -> dict:
             conn.commit()
             return err(f"Ошибка Ozon API: {e}", 502)
 
-        # Лог: успех с деталями
         cur.execute(
-            f"""UPDATE {SCHEMA}.sync_log
-                SET status='success',
-                    products_count=%s,
-                    finished_at=NOW()
-                WHERE id=%s""",
+            f"UPDATE {SCHEMA}.sync_log SET status='success', products_count=%s, finished_at=NOW() WHERE id=%s",
             (stats["synced"], log_id),
         )
         conn.commit()
 
         return ok({
             "ok":             True,
+            "action":         "products",
             "platform":       "ozon",
             "synced":         stats["synced"],
             "prices_updated": stats["prices_updated"],
             "products":       stats["products"],
             "log": {
-                "total_products":  stats["synced"],
-                "prices_updated":  stats["prices_updated"],
-                "prices_changed":  sum(1 for p in stats["products"] if p.get("price_changed")),
+                "total_products": stats["synced"],
+                "prices_updated": stats["prices_updated"],
+                "prices_changed": sum(1 for p in stats["products"] if p.get("price_changed")),
             },
         })
 

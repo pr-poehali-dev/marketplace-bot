@@ -1138,6 +1138,8 @@ export default function Index() {
                       <th className="text-right px-4 py-3 text-xs font-medium text-muted-foreground uppercase tracking-wider">Цена</th>
                       <th className="text-right px-4 py-3 text-xs font-medium text-muted-foreground uppercase tracking-wider">Продажи</th>
                       <th className="text-right px-4 py-3 text-xs font-medium text-muted-foreground uppercase tracking-wider">Выручка</th>
+                      <th className="text-right px-4 py-3 text-xs font-medium text-muted-foreground uppercase tracking-wider">Прибыль</th>
+                      <th className="text-right px-4 py-3 text-xs font-medium text-muted-foreground uppercase tracking-wider">Маржа</th>
                       <th className="text-right px-4 py-3 text-xs font-medium text-muted-foreground uppercase tracking-wider">Остаток</th>
                       <th className="px-4 py-3" />
                     </tr>
@@ -1162,6 +1164,10 @@ export default function Index() {
                         const isChanged = appliedPrices[p.sku] !== undefined;
                         const newRevenue = appliedPrice * p.sales;
                         const origRevenue = p.current_price * p.sales;
+                        const commission = appliedPrice * (p.commission_pct / 100);
+                        const profit = appliedPrice - p.cost_price - commission - p.logistics_cost;
+                        const margin = appliedPrice > 0 ? (profit / appliedPrice) * 100 : 0;
+                        const profitColor = profit > 0 ? "text-green-400" : profit < 0 ? "text-red-400" : "text-muted-foreground";
                         return (
                           <tr key={p.sku} className="border-b border-border last:border-0 hover:bg-secondary/40 transition-colors">
                             <td className="px-4 py-3 text-foreground">{p.name}</td>
@@ -1189,6 +1195,16 @@ export default function Index() {
                               </div>
                             </td>
                             <td className="px-4 py-3 font-mono-num text-right">
+                              <span className={`font-medium ${profitColor}`}>
+                                {profit >= 0 ? "+" : ""}{profit.toFixed(0)} ₽
+                              </span>
+                            </td>
+                            <td className="px-4 py-3 font-mono-num text-right">
+                              <span className={`font-medium ${profitColor}`}>
+                                {margin.toFixed(1)}%
+                              </span>
+                            </td>
+                            <td className="px-4 py-3 font-mono-num text-right">
                               <span className={p.stock === 0 ? "text-red-400" : p.stock < 20 ? "text-yellow-400" : "text-green-400"}>
                                 {p.stock === 0 ? "Нет" : p.stock}
                               </span>
@@ -1213,6 +1229,10 @@ export default function Index() {
                       const appliedPrice = calcP ? (appliedPrices[calcP.sku] ?? basePrice) : basePrice;
                       const isChanged = calcP && appliedPrices[calcP.sku] !== undefined;
                       const newRevenue = calcP ? (appliedPrice * p.sales) : null;
+                      const commission = calcP ? appliedPrice * (calcP.commissionPct / 100) : 0;
+                      const profit = calcP ? appliedPrice - calcP.costPrice - commission - calcP.logisticsCost : 0;
+                      const margin = appliedPrice > 0 && calcP ? (profit / appliedPrice) * 100 : 0;
+                      const profitColor = profit > 0 ? "text-green-400" : profit < 0 ? "text-red-400" : "text-muted-foreground";
                       return (
                         <tr key={p.sku} className="border-b border-border last:border-0 hover:bg-secondary/40 transition-colors">
                           <td className="px-4 py-3 text-foreground">{p.name}</td>
@@ -1244,6 +1264,20 @@ export default function Index() {
                             )}
                           </td>
                           <td className="px-4 py-3 font-mono-num text-right">
+                            {calcP ? (
+                              <span className={`font-medium ${profitColor}`}>
+                                {profit >= 0 ? "+" : ""}{profit.toFixed(0)} ₽
+                              </span>
+                            ) : <span className="text-muted-foreground">—</span>}
+                          </td>
+                          <td className="px-4 py-3 font-mono-num text-right">
+                            {calcP ? (
+                              <span className={`font-medium ${profitColor}`}>
+                                {margin.toFixed(1)}%
+                              </span>
+                            ) : <span className="text-muted-foreground">—</span>}
+                          </td>
+                          <td className="px-4 py-3 font-mono-num text-right">
                             <span className={p.stock === 0 ? "text-red-400" : p.stock < 20 ? "text-yellow-400" : "text-green-400"}>
                               {p.stock === 0 ? "Нет" : p.stock}
                             </span>
@@ -1263,7 +1297,7 @@ export default function Index() {
                     {/* Empty state after sync */}
                     {dbLoaded && dbProducts.length === 0 && d.products.length === 0 && (
                       <tr>
-                        <td colSpan={8} className="px-4 py-8 text-center text-sm text-muted-foreground">
+                        <td colSpan={10} className="px-4 py-8 text-center text-sm text-muted-foreground">
                           Нажмите «Синхронизировать» чтобы загрузить товары
                         </td>
                       </tr>

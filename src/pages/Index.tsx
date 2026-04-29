@@ -710,7 +710,7 @@ export default function Index() {
   }, []);
 
   // Ozon integration form
-  interface OzonIntegration { id: string; client_id: string; api_key_preview: string; updated_at: string; connected: boolean; }
+  interface OzonIntegration { id: string; client_id: string; api_key_preview: string; updated_at: string; last_sync_at?: string; connected: boolean; }
   const [ozonIntegration, setOzonIntegration] = useState<OzonIntegration | null>(null);
   const [ozonClientId, setOzonClientId] = useState("");
   const [ozonApiKey, setOzonApiKey] = useState("");
@@ -720,15 +720,32 @@ export default function Index() {
   const [ozonSalesSyncing, setOzonSalesSyncing] = useState(false);
   const [ozonFullSyncing, setOzonFullSyncing] = useState(false);
   const [ozonStatus, setOzonStatus] = useState<{ ok: boolean; msg: string } | null>(null);
+  // Состояние для кнопки в таблице товаров
+  const [ozonTableSyncing, setOzonTableSyncing] = useState(false);
+  const [ozonTableResult, setOzonTableResult] = useState<{ ok: boolean; msg: string } | null>(null);
+  const [ozonTableCooldown, setOzonTableCooldown] = useState(false);
 
   const loadOzonIntegration = useCallback(async () => {
     const data = await apiGetIntegration("ozon");
-    if (data?.integration) setOzonIntegration(data.integration);
+    if (data?.integration) {
+      setOzonIntegration(data.integration);
+      // Проверяем cooldown по last_sync_at
+      if (data.integration.last_sync_at) {
+        const diff = Date.now() - new Date(data.integration.last_sync_at).getTime();
+        if (diff < 3600_000) {
+          setOzonTableCooldown(true);
+          setTimeout(() => setOzonTableCooldown(false), 3600_000 - diff);
+        }
+      }
+    }
   }, []);
 
   useEffect(() => {
     if (activeSection === "settings") {
       loadRules();
+      loadOzonIntegration();
+    }
+    if (activeSection === "products") {
       loadOzonIntegration();
     }
   }, [activeSection, loadRules, loadOzonIntegration]);
@@ -1399,26 +1416,84 @@ export default function Index() {
                   <Icon name="Search" size={14} className="text-muted-foreground" />
                   <input className="bg-transparent text-sm text-foreground placeholder:text-muted-foreground outline-none w-full" placeholder="Поиск по каталогу..." />
                 </div>
-                <div className="flex items-center gap-2">
-                  {/* Sync info */}
-                  {lastSyncTime && (
-                    <span className="text-xs text-muted-foreground hidden sm:block">
-                      Обновлено: {new Date(lastSyncTime).toLocaleString("ru-RU", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" })}
+                <div className="flex items-center gap-2 flex-wrap justify-end">
+                  {/* Время последней Ozon-синхронизации */}
+                  {ozonIntegration?.last_sync_at && (
+                    <span className="text-xs text-muted-foreground hidden md:flex items-center gap-1">
+                      <span className="w-1.5 h-1.5 rounded-full bg-green-400 shrink-0" />
+                      Ozon: {new Date(ozonIntegration.last_sync_at).toLocaleString("ru-RU", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" })}
                     </span>
                   )}
-                  {syncError && (
-                    <span className="text-xs text-red-400 max-w-xs truncate">{syncError}</span>
+
+                  {/* Результат Ozon-синхронизации из таблицы */}
+                  {ozonTableResult && (
+                    <span className={`text-xs max-w-xs truncate ${ozonTableResult.ok ? "text-green-400" : "text-red-400"}`}>
+                      {ozonTableResult.msg}
+                    </span>
                   )}
-                  <button
-                    onClick={handleSync}
-                    disabled={syncing || syncCooldown}
-                    title={syncCooldown ? "Синхронизация доступна раз в час" : "Синхронизировать товары"}
-                    className="flex items-center gap-1.5 text-sm px-3 py-2 rounded border border-border hover:border-primary/50 text-muted-foreground hover:text-foreground transition-all disabled:opacity-40 disabled:cursor-not-allowed"
-                  >
-                    <Icon name="RefreshCw" size={14} className={syncing ? "animate-spin" : ""} />
-                    {syncing ? "Синхронизация..." : syncCooldown ? "Недоступно (1ч)" : "Синхронизировать"}
-                  </button>
-                  <button className="flex items-center gap-2 text-sm px-4 py-2 rounded text-white" style={{ background: platformAccent }}>
+
+                  {/* Кнопка Ozon (показывается если интеграция настроена) */}
+                  {ozonIntegration?.connected && (
+                    <button
+                      onClick={async () => {
+                        setOzonTableSyncing(true);
+                        setOzonTableResult(null);
+                        const data = await apiSyncOzonFull();
+                        if (data?.ok) {
+                          const s = data.summary;
+                          setOzonTableResult({
+                            ok: true,
+                            msg: `✓ Ozon: ${s.products_synced} тов · ${s.total_orders} заказов · ${Number(s.total_revenue).toLocaleString("ru-RU")} ₽`,
+                          });
+                          setOzonTableCooldown(true);
+                          setTimeout(() => setOzonTableCooldown(false), 3600_000);
+                          // Обновляем last_sync_at локально
+                          setOzonIntegration(prev => prev ? { ...prev, last_sync_at: new Date().toISOString() } : prev);
+                          await loadData();
+                        } else {
+                          setOzonTableResult({ ok: false, msg: data?.error || "Ошибка синхронизации" });
+                        }
+                        setOzonTableSyncing(false);
+                      }}
+                      disabled={ozonTableSyncing || ozonTableCooldown}
+                      title={ozonTableCooldown ? "Полная синхронизация доступна раз в час" : "Синхронизировать с Ozon (товары + цены + продажи)"}
+                      className="flex items-center gap-1.5 text-sm px-3 py-2 rounded border transition-all disabled:opacity-40 disabled:cursor-not-allowed"
+                      style={ozonTableCooldown
+                        ? { borderColor: "hsl(220,12%,20%)", color: "hsl(215,14%,40%)", background: "hsl(220,14%,9%)" }
+                        : { borderColor: "#005BFF40", color: "#4d9fff", background: "rgba(0,91,255,0.08)" }
+                      }
+                    >
+                      <Icon name="RefreshCw" size={13} className={ozonTableSyncing ? "animate-spin" : ""} />
+                      {ozonTableSyncing
+                        ? "Ozon..."
+                        : ozonTableCooldown
+                        ? "Ozon (1ч)"
+                        : "Ozon"}
+                    </button>
+                  )}
+
+                  {/* Обычная кнопка синхронизации (демо / без интеграции) */}
+                  {!ozonIntegration?.connected && (
+                    <>
+                      {lastSyncTime && (
+                        <span className="text-xs text-muted-foreground hidden sm:block">
+                          {new Date(lastSyncTime).toLocaleString("ru-RU", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" })}
+                        </span>
+                      )}
+                      {syncError && <span className="text-xs text-red-400 max-w-xs truncate">{syncError}</span>}
+                      <button
+                        onClick={handleSync}
+                        disabled={syncing || syncCooldown}
+                        title={syncCooldown ? "Синхронизация доступна раз в час" : "Синхронизировать (демо)"}
+                        className="flex items-center gap-1.5 text-sm px-3 py-2 rounded border border-border hover:border-primary/50 text-muted-foreground hover:text-foreground transition-all disabled:opacity-40 disabled:cursor-not-allowed"
+                      >
+                        <Icon name="RefreshCw" size={14} className={syncing ? "animate-spin" : ""} />
+                        {syncing ? "Синхронизация..." : syncCooldown ? "Недоступно (1ч)" : "Синхронизировать"}
+                      </button>
+                    </>
+                  )}
+
+                  <button className="flex items-center gap-2 text-sm px-4 py-2 rounded text-white shrink-0" style={{ background: platformAccent }}>
                     <Icon name="Plus" size={14} />
                     Добавить товар
                   </button>

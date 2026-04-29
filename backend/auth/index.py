@@ -88,17 +88,18 @@ def handler(event: dict, context) -> dict:
 
             pw_hash = bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
             cur.execute(
-                f"INSERT INTO {SCHEMA}.users (email, password_hash, name) VALUES (%s, %s, %s) RETURNING id",
+                f"INSERT INTO {SCHEMA}.users (email, password_hash, name) VALUES (%s, %s, %s) RETURNING id, plan",
                 (email, pw_hash, name),
             )
-            user_id = str(cur.fetchone()[0])
+            r = cur.fetchone()
+            user_id, plan = str(r[0]), r[1]
             session_token = secrets.token_hex(32)
             cur.execute(
                 f"INSERT INTO {SCHEMA}.sessions (user_id, token) VALUES (%s, %s)",
                 (user_id, session_token),
             )
             conn.commit()
-            return ok({"token": session_token, "user": {"id": user_id, "email": email, "name": name}})
+            return ok({"token": session_token, "user": {"id": user_id, "email": email, "name": name, "plan": plan}})
 
         # ── POST ?action=login ───────────────────────────────────────
         elif action == "login" and method == "POST":
@@ -109,14 +110,14 @@ def handler(event: dict, context) -> dict:
                 return err("Email и пароль обязательны")
 
             cur.execute(
-                f"SELECT id, email, name, password_hash FROM {SCHEMA}.users WHERE email = %s",
+                f"SELECT id, email, name, password_hash, plan FROM {SCHEMA}.users WHERE email = %s",
                 (email,),
             )
             row = cur.fetchone()
             if not row:
                 return err("Неверный email или пароль", 401)
 
-            user_id, user_email, user_name, pw_hash = row
+            user_id, user_email, user_name, pw_hash, user_plan = row
             if not bcrypt.checkpw(password.encode(), pw_hash.encode()):
                 return err("Неверный email или пароль", 401)
 
@@ -127,7 +128,7 @@ def handler(event: dict, context) -> dict:
                 (user_id, session_token),
             )
             conn.commit()
-            return ok({"token": session_token, "user": {"id": user_id, "email": user_email, "name": user_name}})
+            return ok({"token": session_token, "user": {"id": user_id, "email": user_email, "name": user_name, "plan": user_plan}})
 
         # ── POST ?action=logout ──────────────────────────────────────
         elif action == "logout" and method == "POST":
@@ -145,18 +146,19 @@ def handler(event: dict, context) -> dict:
                 return err("Не авторизован", 401)
 
             cur.execute(
-                f"SELECT id, email, name, ozon_api_key, wb_api_key FROM {SCHEMA}.users WHERE id = %s",
+                f"SELECT id, email, name, ozon_api_key, wb_api_key, plan FROM {SCHEMA}.users WHERE id = %s",
                 (user_id,),
             )
             row = cur.fetchone()
             if not row:
                 return err("Пользователь не найден", 404)
-            uid, email, name, ozon_key, wb_key = row
+            uid, email, name, ozon_key, wb_key, plan = row
             return ok({
                 "user": {
                     "id": str(uid), "email": email, "name": name,
                     "hasOzonKey": bool(ozon_key),
                     "hasWbKey": bool(wb_key),
+                    "plan": plan,
                 }
             })
 

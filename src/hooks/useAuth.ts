@@ -7,6 +7,7 @@ export interface User {
   name: string;
   hasOzonKey: boolean;
   hasWbKey: boolean;
+  plan: "free" | "pro";
 }
 
 export function useAuth() {

@@ -684,6 +684,9 @@ export default function Index() {
   // Price history modal
   const [historyModal, setHistoryModal] = useState<{ sku: string; name: string } | null>(null);
 
+  // Plan limit error
+  const [limitError, setLimitError] = useState<{ msg: string; plan: string; limit: number; current: number } | null>(null);
+
   // Dialog state
   const [calcDialogProduct, setCalcDialogProduct] = useState<typeof CALC_PRODUCTS[0] | null>(null);
   const [calcDialogInitPrice, setCalcDialogInitPrice] = useState<number | undefined>(undefined);
@@ -758,9 +761,15 @@ export default function Index() {
     if (syncing || syncCooldown) return;
     setSyncing(true);
     setSyncError("");
+    setLimitError(null);
     const data = await apiSyncProducts("all");
     if (data?.error) {
-      setSyncError(data.error);
+      // Ошибка лимита тарифа
+      if (data.plan && data.limit !== undefined) {
+        setLimitError({ msg: data.error, plan: data.plan, limit: data.limit, current: data.current });
+      } else {
+        setSyncError(data.error);
+      }
     } else {
       // Сразу блокируем кнопку и показываем время
       const now = new Date().toISOString();
@@ -906,6 +915,16 @@ export default function Index() {
             </div>
 
             <div className="flex items-center gap-2">
+              {/* Plan badge */}
+              <span
+                className="text-[10px] font-bold px-2 py-0.5 rounded-full tracking-wider"
+                style={user?.plan === "pro"
+                  ? { background: "rgba(250,204,21,0.15)", color: "#fbbf24", border: "1px solid rgba(250,204,21,0.3)" }
+                  : { background: "rgba(148,163,184,0.1)", color: "#94a3b8", border: "1px solid rgba(148,163,184,0.2)" }
+                }
+              >
+                {user?.plan?.toUpperCase() ?? "FREE"}
+              </span>
               <div className="w-7 h-7 rounded-full flex items-center justify-center text-xs font-bold text-white shrink-0" style={{ background: "hsl(210,100%,56%)" }}>
                 {user?.name ? user.name[0].toUpperCase() : "U"}
               </div>
@@ -1274,6 +1293,61 @@ export default function Index() {
           {/* ── PRODUCTS ── */}
           {activeSection === "products" && (
             <div className="space-y-4">
+
+              {/* Лимит тарифа */}
+              {limitError && (
+                <div className="rounded-lg border border-red-400/30 bg-red-400/8 p-4 flex items-start gap-3">
+                  <Icon name="ShieldAlert" size={16} className="text-red-400 shrink-0 mt-0.5" />
+                  <div className="flex-1 min-w-0">
+                    <p className="text-sm font-semibold text-red-400">Превышен лимит тарифа {limitError.plan.toUpperCase()}</p>
+                    <p className="text-xs text-muted-foreground mt-1">{limitError.msg}</p>
+                    <div className="flex items-center gap-3 mt-2">
+                      <div className="flex-1 h-1.5 rounded-full overflow-hidden" style={{ background: "hsl(220,12%,20%)" }}>
+                        <div
+                          className="h-full rounded-full bg-red-400 transition-all"
+                          style={{ width: `${Math.min(100, (limitError.current / limitError.limit) * 100)}%` }}
+                        />
+                      </div>
+                      <span className="text-xs font-mono-num text-red-400 shrink-0">
+                        {limitError.current} / {limitError.limit} товаров
+                      </span>
+                    </div>
+                  </div>
+                  <button
+                    onClick={() => setLimitError(null)}
+                    className="text-muted-foreground hover:text-foreground transition-colors shrink-0"
+                  >
+                    <Icon name="X" size={14} />
+                  </button>
+                </div>
+              )}
+
+              {/* Прогресс-бар лимита (когда нет ошибки) */}
+              {!limitError && dbLoaded && dbProducts.length > 0 && user && (() => {
+                const limit = user.plan === "pro" ? 500 : 50;
+                const pct = Math.min(100, (dbProducts.length / limit) * 100);
+                const warn = pct >= 80;
+                return (
+                  <div className="flex items-center gap-3 px-1">
+                    <span className="text-xs text-muted-foreground shrink-0">{dbProducts.length} / {limit} товаров</span>
+                    <div className="flex-1 h-1 rounded-full overflow-hidden" style={{ background: "hsl(220,12%,16%)" }}>
+                      <div
+                        className="h-full rounded-full transition-all"
+                        style={{ width: `${pct}%`, background: warn ? "#f87171" : "#4ade80" }}
+                      />
+                    </div>
+                    <span className="text-[10px] font-bold px-1.5 py-0.5 rounded-full shrink-0"
+                      style={user.plan === "pro"
+                        ? { background: "rgba(250,204,21,0.15)", color: "#fbbf24" }
+                        : { background: "rgba(148,163,184,0.1)", color: "#94a3b8" }
+                      }
+                    >
+                      {user.plan.toUpperCase()}
+                    </span>
+                  </div>
+                );
+              })()}
+
               <div className="flex items-center justify-between gap-3 flex-wrap">
                 <div className="flex items-center gap-2 border border-border rounded px-3 py-2 w-64" style={{ background: "hsl(220,14%,9%)" }}>
                   <Icon name="Search" size={14} className="text-muted-foreground" />

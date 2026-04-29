@@ -1,7 +1,7 @@
 import { useState, useMemo, useEffect, useCallback } from "react";
 import Icon from "@/components/ui/icon";
 import { useAuth } from "@/hooks/useAuth";
-import { apiGetProducts, apiGetPrices, apiSavePrice, apiSyncProducts, apiGetRecommendations, apiGetPriceHistory, apiGetRules, apiCreateRule, apiUpdateRule, apiGetIntegration, apiSaveIntegration, apiVerifyIntegration, apiSyncOzon, apiSyncOzonSales, apiSyncOzonFull, apiPushPriceToOzon } from "@/lib/api";
+import { apiGetProducts, apiGetPrices, apiSavePrice, apiSyncProducts, apiGetRecommendations, apiGetPriceHistory, apiGetRules, apiCreateRule, apiUpdateRule, apiGetIntegration, apiSaveIntegration, apiVerifyIntegration, apiSyncOzon, apiSyncOzonSales, apiSyncOzonFull, apiPushPriceToOzon, apiSaveWbIntegration, apiGetWbIntegration, apiVerifyWbToken } from "@/lib/api";
 
 type Section = "sync" | "analytics" | "finance" | "pricing" | "products" | "orders" | "settings";
 type Platform = "all" | "ozon" | "wb";
@@ -791,7 +791,6 @@ export default function Index() {
     const data = await apiGetIntegration("ozon");
     if (data?.integration) {
       setOzonIntegration(data.integration);
-      // Проверяем cooldown по last_sync_at
       if (data.integration.last_sync_at) {
         const diff = Date.now() - new Date(data.integration.last_sync_at).getTime();
         if (diff < 3600_000) {
@@ -802,15 +801,29 @@ export default function Index() {
     }
   }, []);
 
+  // WB integration form
+  interface WbIntegration { id: string; api_key_preview: string; updated_at: string; last_sync_at?: string; connected: boolean; }
+  const [wbIntegration, setWbIntegration] = useState<WbIntegration | null>(null);
+  const [wbApiToken, setWbApiToken] = useState("");
+  const [wbSaving, setWbSaving] = useState(false);
+  const [wbVerifying, setWbVerifying] = useState(false);
+  const [wbStatus, setWbStatus] = useState<{ ok: boolean; msg: string } | null>(null);
+
+  const loadWbIntegration = useCallback(async () => {
+    const data = await apiGetWbIntegration();
+    if (data?.integration) setWbIntegration(data.integration);
+  }, []);
+
   useEffect(() => {
     if (activeSection === "settings") {
       loadRules();
       loadOzonIntegration();
+      loadWbIntegration();
     }
     if (activeSection === "products") {
       loadOzonIntegration();
     }
-  }, [activeSection, loadRules, loadOzonIntegration]);
+  }, [activeSection, loadRules, loadOzonIntegration, loadWbIntegration]);
 
   // Dialog state
   const [calcDialogProduct, setCalcDialogProduct] = useState<typeof CALC_PRODUCTS[0] | null>(null);
@@ -2219,6 +2232,92 @@ export default function Index() {
                       </div>
                     </div>
                   )}
+                </div>
+              </div>
+
+              {/* ── Интеграция Wildberries ── */}
+              <div className="rounded-lg border border-border overflow-hidden" style={{ background: "hsl(220,14%,9%)" }}>
+                <div className="flex items-center gap-3 px-5 py-4 border-b border-border">
+                  <div className="w-8 h-8 rounded-lg flex items-center justify-center shrink-0" style={{ background: "#CB11AB" }}>
+                    <span className="text-white text-[10px] font-bold">WB</span>
+                  </div>
+                  <div className="flex-1">
+                    <h2 className="text-sm font-semibold text-foreground">Wildberries Seller API</h2>
+                    <p className="text-xs text-muted-foreground mt-0.5">
+                      {wbIntegration?.connected
+                        ? `Подключено · токен: ${wbIntegration.api_key_preview}`
+                        : "Не настроено — синхронизация работает в демо-режиме"}
+                    </p>
+                  </div>
+                  {wbIntegration?.connected && (
+                    <span className="flex items-center gap-1 text-[10px] font-medium text-green-400 bg-green-400/10 border border-green-400/25 px-2 py-0.5 rounded-full">
+                      <Icon name="CheckCircle2" size={10} />
+                      Активно
+                    </span>
+                  )}
+                </div>
+
+                <div className="px-5 py-5 space-y-4">
+                  <div>
+                    <label className="text-xs text-muted-foreground block mb-1.5">API-токен</label>
+                    <input
+                      type="password"
+                      value={wbApiToken}
+                      onChange={(e) => { setWbApiToken(e.target.value); setWbStatus(null); }}
+                      placeholder={wbIntegration?.api_key_preview || "eyJhbGci..."}
+                      className="w-full rounded border border-border px-3 py-2.5 text-sm text-foreground placeholder:text-muted-foreground outline-none focus:border-pink-500/50 transition-colors"
+                      style={{ background: "hsl(220,16%,6%)" }}
+                    />
+                    <p className="text-[10px] text-muted-foreground mt-1.5">
+                      Найти в кабинете WB: Настройки → Доступ к API → Создать токен (категория Продажи)
+                    </p>
+                  </div>
+
+                  {wbStatus && (
+                    <div className={`flex items-center gap-2 text-xs px-3 py-2.5 rounded-lg border ${wbStatus.ok ? "text-green-400 bg-green-400/8 border-green-400/25" : "text-red-400 bg-red-400/8 border-red-400/25"}`}>
+                      <Icon name={wbStatus.ok ? "CheckCircle2" : "XCircle"} size={13} />
+                      {wbStatus.msg}
+                    </div>
+                  )}
+
+                  <div className="flex items-center gap-2">
+                    <button
+                      disabled={wbVerifying || !wbApiToken}
+                      onClick={async () => {
+                        setWbVerifying(true); setWbStatus(null);
+                        const data = await apiVerifyWbToken(wbApiToken);
+                        setWbStatus(data?.valid
+                          ? { ok: true, msg: "Токен действителен — подключение к WB успешно" }
+                          : { ok: false, msg: data?.error || "Проверка не прошла" }
+                        );
+                        setWbVerifying(false);
+                      }}
+                      className="flex items-center gap-1.5 text-sm px-4 py-2 rounded border border-border hover:border-primary/50 text-muted-foreground hover:text-foreground transition-all disabled:opacity-40 disabled:cursor-not-allowed"
+                    >
+                      {wbVerifying ? <Icon name="Loader2" size={14} className="animate-spin" /> : <Icon name="Plug" size={14} />}
+                      Проверить
+                    </button>
+                    <button
+                      disabled={wbSaving || !wbApiToken}
+                      onClick={async () => {
+                        setWbSaving(true); setWbStatus(null);
+                        const data = await apiSaveWbIntegration(wbApiToken);
+                        if (data?.ok) {
+                          setWbStatus({ ok: true, msg: "Интеграция Wildberries сохранена" });
+                          setWbIntegration(data.integration);
+                          setWbApiToken("");
+                        } else {
+                          setWbStatus({ ok: false, msg: data?.error || "Ошибка сохранения" });
+                        }
+                        setWbSaving(false);
+                      }}
+                      className="flex items-center gap-1.5 text-sm px-4 py-2 rounded text-white transition-all hover:opacity-80 disabled:opacity-40 disabled:cursor-not-allowed"
+                      style={{ background: "#CB11AB" }}
+                    >
+                      {wbSaving ? <Icon name="Loader2" size={14} className="animate-spin" /> : <Icon name="Save" size={14} />}
+                      Сохранить
+                    </button>
+                  </div>
                 </div>
               </div>
 

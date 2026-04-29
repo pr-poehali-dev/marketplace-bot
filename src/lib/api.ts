@@ -140,6 +140,32 @@ export async function apiVerifyIntegration(platform: "ozon" | "wb", api_key: str
   return parseResponse(res);
 }
 
+export async function apiSaveWbIntegration(api_key: string) {
+  const res = await fetch(INTEGRATIONS_URL, {
+    method: "POST",
+    headers: authHeaders(),
+    body: JSON.stringify({ platform: "wb", api_key }),
+  });
+  return parseResponse(res);
+}
+
+export async function apiGetWbIntegration() {
+  const res = await fetch(`${INTEGRATIONS_URL}?platform=wb`, {
+    method: "GET",
+    headers: authHeaders(),
+  });
+  return parseResponse(res);
+}
+
+export async function apiVerifyWbToken(api_key: string) {
+  const res = await fetch(`${INTEGRATIONS_URL}?action=verify`, {
+    method: "POST",
+    headers: authHeaders(),
+    body: JSON.stringify({ platform: "wb", api_key }),
+  });
+  return parseResponse(res);
+}
+
 // ── Sync Ozon ─────────────────────────────────────────────────────
 
 const SYNC_OZON_URL = "https://functions.poehali.dev/6012000a-4e18-49a7-9787-fc0a61d7d90c";

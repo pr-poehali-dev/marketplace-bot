@@ -31,30 +31,29 @@ def require_auth(cur, event: dict):
 
 
 def ok(data):
-    return {"statusCode": 200, "headers": CORS, "body": json.dumps(data, ensure_ascii=False, default=str)}
+    return {"statusCode": 200, "headers": CORS,
+            "body": json.dumps(data, ensure_ascii=False, default=str)}
 
 
 def err(msg, code=400):
-    return {"statusCode": code, "headers": CORS, "body": json.dumps({"error": msg}, ensure_ascii=False)}
+    return {"statusCode": code, "headers": CORS,
+            "body": json.dumps({"error": msg}, ensure_ascii=False)}
 
+
+# ── Platform verifiers ─────────────────────────────────────────────
 
 def verify_ozon_credentials(client_id: str, api_key: str) -> tuple[bool, str]:
     """
     Проверяет Client-Id + Api-Key через Ozon API.
-    Использует /v1/category/tree — лёгкий эндпоинт, не требует данных.
-    Возвращает (ok, error_message).
+    POST /v1/category/tree — лёгкий эндпоинт без изменений данных.
     """
     url = "https://api-seller.ozon.ru/v1/category/tree"
-    payload = json.dumps({"language": "RU"}).encode()
     req = urllib.request.Request(
         url,
-        data=payload,
+        data=json.dumps({"language": "RU"}).encode(),
         method="POST",
-        headers={
-            "Content-Type": "application/json",
-            "Client-Id": client_id,
-            "Api-Key": api_key,
-        },
+        headers={"Content-Type": "application/json",
+                 "Client-Id": client_id, "Api-Key": api_key},
     )
     try:
         with urllib.request.urlopen(req, timeout=10) as resp:
@@ -69,16 +68,59 @@ def verify_ozon_credentials(client_id: str, api_key: str) -> tuple[bool, str]:
         return False, f"Не удалось подключиться к Ozon API: {e}"
 
 
+def verify_wb_token(api_token: str) -> tuple[bool, str]:
+    """
+    Проверяет WB API-токен через Seller API.
+    GET /api/v3/warehouses — лёгкий GET-запрос без изменений данных.
+    Документация: https://openapi.wildberries.ru/
+    """
+    url = "https://marketplace-api.wildberries.ru/api/v3/warehouses"
+    req = urllib.request.Request(
+        url,
+        method="GET",
+        headers={"Authorization": api_token},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            # 200 или 204 — токен действителен
+            return resp.status in (200, 204), ""
+    except urllib.error.HTTPError as e:
+        if e.code == 401:
+            return False, "Неверный API-токен Wildberries"
+        if e.code == 403:
+            return False, "Доступ запрещён — проверьте разрешения токена в кабинете WB"
+        if e.code == 429:
+            # Rate limit — токен скорее всего валиден
+            return True, ""
+        return False, f"Wildberries API вернул ошибку {e.code}"
+    except Exception as e:
+        return False, f"Не удалось подключиться к Wildberries API: {e}"
+
+
+def mask_token(token: str | None) -> str | None:
+    """Скрывает токен: первые 4 + **** + последние 4 символа."""
+    if not token or len(token) < 9:
+        return token
+    return token[:4] + "****" + token[-4:]
+
+
+# ── Handler ────────────────────────────────────────────────────────
+
 def handler(event: dict, context) -> dict:
     """
     Интеграции с маркетплейсами.
 
-    GET  /                          — список интеграций (ключи скрыты)
-    POST / body: {platform, api_key, client_id?}
-                                    — сохранить/обновить интеграцию
-    GET  /?platform=ozon            — интеграция конкретной платформы
-    POST /?action=verify&platform=ozon
-                                    — проверить учётные данные без сохранения
+    GET  /                    — список всех интеграций пользователя
+    GET  /?platform=ozon|wb   — интеграция конкретной платформы
+
+    POST /?action=verify      — проверить ключи без сохранения
+      body: { platform, api_key, client_id? }
+      Ozon: нужны client_id + api_key
+      WB:   нужен только api_key (это и есть api_token)
+
+    POST /                    — сохранить/обновить интеграцию
+      Ozon body: { platform: "ozon", api_key, client_id }
+      WB   body: { platform: "wb",   api_key }   (api_key = api_token)
     """
     if event.get("httpMethod") == "OPTIONS":
         return {"statusCode": 200, "headers": CORS, "body": ""}
@@ -93,16 +135,16 @@ def handler(event: dict, context) -> dict:
         if not user_id:
             return err("Не авторизован", 401)
 
-        # ── GET /?platform=ozon — одна интеграция ────────────────────
+        # ── GET /?platform=... — одна интеграция ─────────────────────
         if method == "GET" and qs.get("platform"):
             platform = qs["platform"].lower()
+            if platform not in ("ozon", "wb"):
+                return err("platform должен быть ozon или wb")
+
             cur.execute(
                 f"""SELECT id, platform,
-                           CASE WHEN api_key IS NOT NULL
-                                THEN LEFT(api_key, 4) || '****' || RIGHT(api_key, 4)
-                                ELSE NULL END AS api_key_preview,
-                           client_id,
-                           created_at, updated_at
+                           api_key,
+                           client_id, created_at, updated_at, last_sync_at
                     FROM {SCHEMA}.integrations
                     WHERE user_id = %s AND platform = %s""",
                 (user_id, platform),
@@ -110,36 +152,39 @@ def handler(event: dict, context) -> dict:
             row = cur.fetchone()
             if not row:
                 return ok({"integration": None})
+
             return ok({
                 "integration": {
-                    "id": str(row[0]),
-                    "platform": row[1],
-                    "api_key_preview": row[2],
-                    "client_id": row[3],
-                    "created_at": str(row[4]),
-                    "updated_at": str(row[5]),
-                    "connected": True,
+                    "id":              str(row[0]),
+                    "platform":        row[1],
+                    "api_key_preview": mask_token(row[2]),
+                    "client_id":       row[3],            # только для Ozon
+                    "created_at":      str(row[4]),
+                    "updated_at":      str(row[5]),
+                    "last_sync_at":    str(row[6]) if row[6] else None,
+                    "connected":       True,
                 }
             })
 
-        # ── GET / — список всех интеграций ───────────────────────────
+        # ── GET / — список всех ───────────────────────────────────────
         elif method == "GET":
             cur.execute(
-                f"""SELECT id, platform,
-                           CASE WHEN api_key IS NOT NULL
-                                THEN LEFT(api_key, 4) || '****' || RIGHT(api_key, 4)
-                                ELSE NULL END,
-                           client_id, created_at, updated_at
+                f"""SELECT id, platform, api_key, client_id,
+                           created_at, updated_at, last_sync_at
                     FROM {SCHEMA}.integrations
                     WHERE user_id = %s ORDER BY platform""",
                 (user_id,),
             )
             integrations = [
                 {
-                    "id": str(r[0]), "platform": r[1],
-                    "api_key_preview": r[2], "client_id": r[3],
-                    "created_at": str(r[4]), "updated_at": str(r[5]),
-                    "connected": True,
+                    "id":              str(r[0]),
+                    "platform":        r[1],
+                    "api_key_preview": mask_token(r[2]),
+                    "client_id":       r[3],
+                    "created_at":      str(r[4]),
+                    "updated_at":      str(r[5]),
+                    "last_sync_at":    str(r[6]) if r[6] else None,
+                    "connected":       True,
                 }
                 for r in cur.fetchall()
             ]
@@ -148,8 +193,8 @@ def handler(event: dict, context) -> dict:
         # ── POST /?action=verify — проверить без сохранения ──────────
         elif method == "POST" and qs.get("action") == "verify":
             body = json.loads(event.get("body") or "{}")
-            platform = (body.get("platform") or "").lower()
-            api_key = (body.get("api_key") or "").strip()
+            platform  = (body.get("platform") or "").lower()
+            api_key   = (body.get("api_key") or "").strip()
             client_id = (body.get("client_id") or "").strip()
 
             if platform == "ozon":
@@ -157,45 +202,58 @@ def handler(event: dict, context) -> dict:
                     return err("Для Ozon нужны client_id и api_key")
                 valid, error = verify_ozon_credentials(client_id, api_key)
                 return ok({"valid": valid, "error": error if not valid else None})
+
+            elif platform == "wb":
+                if not api_key:
+                    return err("Для Wildberries нужен api_key (токен)")
+                valid, error = verify_wb_token(api_key)
+                return ok({"valid": valid, "error": error if not valid else None})
+
             return err(f"Проверка не поддерживается для платформы: {platform}")
 
-        # ── POST / — сохранить/обновить интеграцию ───────────────────
+        # ── POST / — сохранить/обновить ──────────────────────────────
         elif method == "POST":
             body = json.loads(event.get("body") or "{}")
-            platform = (body.get("platform") or "").strip().lower()
-            api_key = (body.get("api_key") or "").strip()
+            platform  = (body.get("platform") or "").strip().lower()
+            api_key   = (body.get("api_key") or "").strip()
             client_id = (body.get("client_id") or "").strip() or None
 
             if platform not in ("ozon", "wb"):
                 return err("platform должен быть ozon или wb")
             if not api_key or len(api_key) < 8:
                 return err("api_key обязателен (минимум 8 символов)")
-            if platform == "ozon" and not client_id:
-                return err("Для Ozon обязателен client_id")
 
-            # Опциональная проверка реального ключа для Ozon
+            # Платформо-специфичные проверки
             if platform == "ozon":
+                if not client_id:
+                    return err("Для Ozon обязателен client_id")
                 valid, error = verify_ozon_credentials(client_id, api_key)
                 if not valid:
                     return err(f"Проверка Ozon API не прошла: {error}", 422)
+
+            elif platform == "wb":
+                valid, error = verify_wb_token(api_key)
+                if not valid:
+                    return err(f"Проверка Wildberries API не прошла: {error}", 422)
 
             cur.execute(
                 f"""INSERT INTO {SCHEMA}.integrations (user_id, platform, api_key, client_id)
                     VALUES (%s, %s, %s, %s)
                     ON CONFLICT (user_id, platform) DO UPDATE
-                    SET api_key = EXCLUDED.api_key,
-                        client_id = EXCLUDED.client_id,
+                    SET api_key    = EXCLUDED.api_key,
+                        client_id  = EXCLUDED.client_id,
                         updated_at = NOW()
                     RETURNING id, platform, client_id, updated_at""",
                 (user_id, platform, api_key, client_id),
             )
             row = cur.fetchone()
             conn.commit()
+
             return ok({
                 "ok": True,
                 "integration": {
-                    "id": str(row[0]),
-                    "platform": row[1],
+                    "id":        str(row[0]),
+                    "platform":  row[1],
                     "client_id": row[2],
                     "updated_at": str(row[3]),
                     "connected": True,

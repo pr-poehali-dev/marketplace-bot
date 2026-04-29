@@ -1,15 +1,12 @@
 import json
 import os
-import time
-import urllib.request
-import urllib.error
 from utils import get_conn, require_auth, get_token, cors_headers, SCHEMA
+from ozon_client import ozon_post, OzonAPIError, log_error
 
 
-# ── Ozon price push ────────────────────────────────────────────────
+# ── Helpers ────────────────────────────────────────────────────────
 
 def get_ozon_creds(cur, user_id: str):
-    """Возвращает (client_id, api_key) или (None, None)."""
     cur.execute(
         f"SELECT client_id, api_key FROM {SCHEMA}.integrations WHERE user_id = %s AND platform = 'ozon'",
         (user_id,),
@@ -18,70 +15,43 @@ def get_ozon_creds(cur, user_id: str):
     return (row[0], row[1]) if row else (None, None)
 
 
-def push_price_to_ozon(client_id: str, api_key: str, sku: str, price: float, retries: int = 1) -> dict:
+def push_price_to_ozon(client_id: str, api_key: str, sku: str, price: float, conn=None, user_id=None) -> dict:
     """
-    POST /v1/product/import/prices
-    Устанавливает цену товара на Ozon.
-    retries=1 → одна повторная попытка при ошибке сети/5xx.
-
-    Ответ успеха:
-      { "result": [{ "offer_id": "...", "updated": true, "errors": [] }] }
-    Ответ ошибки позиции:
-      { "result": [{ "offer_id": "...", "updated": false, "errors": [{"code": "...", "message": "..."}] }] }
+    POST /v1/product/import/prices — обновляет цену на Ozon.
+    Бросает OzonAPIError при ошибке (с понятным user_message).
     """
-    url = "https://api-seller.ozon.ru/v1/product/import/prices"
-    payload = json.dumps({
-        "prices": [
-            {
-                "offer_id":   sku,
-                "price":      str(int(price)),       # Ozon принимает строку без копеек
-                "old_price":  "0",                   # 0 = не показывать зачёркнутую цену
-                "price_strategy_enabled": False,
-            }
-        ]
-    }).encode()
+    payload = {
+        "prices": [{
+            "offer_id":               sku,
+            "price":                  str(int(price)),
+            "old_price":              "0",
+            "price_strategy_enabled": False,
+        }]
+    }
 
-    req = urllib.request.Request(
-        url, data=payload, method="POST",
-        headers={
-            "Content-Type": "application/json",
-            "Client-Id":    client_id,
-            "Api-Key":      api_key,
-        },
+    resp = ozon_post(
+        "/v1/product/import/prices",
+        payload,
+        client_id, api_key,
+        conn=conn, user_id=user_id,
+        retries=1,
+        retry_on=(429, 500, 502, 503, 504),
     )
 
-    last_exc: Exception | None = None
-    for attempt in range(retries + 1):
-        try:
-            with urllib.request.urlopen(req, timeout=15) as resp:
-                body = json.loads(resp.read().decode())
-                results = body.get("result", [])
-                if not results:
-                    return {"ok": False, "error": "Ozon вернул пустой результат"}
+    results = resp.get("result", [])
+    if not results:
+        raise OzonAPIError("Ozon вернул пустой результат", 0, "Пустой ответ от Ozon API")
 
-                item = results[0]
-                if item.get("updated"):
-                    return {"ok": True, "offer_id": item["offer_id"]}
+    item = results[0]
+    if item.get("updated"):
+        return {"ok": True, "offer_id": item["offer_id"]}
 
-                # Ошибки на уровне позиции (не HTTP)
-                errors = item.get("errors", [])
-                msg = "; ".join(e.get("message", e.get("code", "unknown")) for e in errors)
-                return {"ok": False, "error": msg or "Ozon отклонил изменение цены"}
-
-        except urllib.error.HTTPError as e:
-            body_text = e.read().decode(errors="ignore")
-            last_exc = RuntimeError(f"HTTP {e.code}: {body_text[:200]}")
-            if e.code < 500:          # 4xx — не ретраим
-                break
-            if attempt < retries:
-                time.sleep(1)
-
-        except Exception as exc:
-            last_exc = exc
-            if attempt < retries:
-                time.sleep(1)
-
-    return {"ok": False, "error": str(last_exc)}
+    errors = item.get("errors", [])
+    msg = "; ".join(e.get("message", e.get("code", "unknown")) for e in errors)
+    if conn:
+        log_error(conn, user_id, "/v1/product/import/prices", 200,
+                  f"updated=false: {msg}", json.dumps(payload))
+    raise OzonAPIError(f"updated=false: {msg}", 200, msg or "Ozon отклонил изменение цены")
 
 
 # ── Handler ────────────────────────────────────────────────────────
@@ -146,7 +116,7 @@ def handler(event: dict, context) -> dict:
                 for r in cur.fetchall()
             }})
 
-        # ── POST ?action=push-ozon — отправить цену в Ozon ───────────
+        # ── POST ?action=push-ozon ────────────────────────────────────
         elif method == "POST" and qs.get("action") == "push-ozon":
             body = json.loads(event.get("body") or "{}")
             sku   = (body.get("sku") or "").strip()
@@ -158,7 +128,6 @@ def handler(event: dict, context) -> dict:
             if price <= 0:
                 return err("Цена должна быть больше 0")
 
-            # Проверяем что товар принадлежит пользователю и платформа — Ozon
             cur.execute(
                 f"SELECT platform FROM {SCHEMA}.products WHERE user_id = %s AND sku = %s",
                 (user_id, sku),
@@ -169,12 +138,10 @@ def handler(event: dict, context) -> dict:
             if row[0].lower() != "ozon":
                 return err(f"Товар {sku} не является товаром Ozon (платформа: {row[0]})", 400)
 
-            # Берём credentials
             client_id, api_key = get_ozon_creds(cur, user_id)
             if not client_id or not api_key:
                 return err("Интеграция Ozon не настроена. Добавьте ключи в Настройки.", 400)
 
-            # Читаем старую цену
             cur.execute(
                 f"""SELECT COALESCE(
                         (SELECT price FROM {SCHEMA}.applied_prices WHERE user_id = %s AND sku = %s),
@@ -184,13 +151,11 @@ def handler(event: dict, context) -> dict:
             )
             old_price = float((cur.fetchone() or [0])[0])
 
-            # Отправляем в Ozon (с 1 retry)
-            result = push_price_to_ozon(client_id, api_key, sku, price, retries=1)
+            try:
+                push_price_to_ozon(client_id, api_key, sku, price, conn=conn, user_id=user_id)
+            except OzonAPIError as e:
+                return err(e.user_message, 502)
 
-            if not result["ok"]:
-                return err(f"Ozon API: {result['error']}", 502)
-
-            # Сохраняем в applied_prices
             cur.execute(
                 f"""INSERT INTO {SCHEMA}.applied_prices (user_id, sku, price)
                     VALUES (%s, %s, %s)
@@ -198,26 +163,20 @@ def handler(event: dict, context) -> dict:
                     SET price = EXCLUDED.price, applied_at = NOW()""",
                 (user_id, sku, price),
             )
-
-            # Записываем историю
             if abs(price - old_price) > 0.001:
                 cur.execute(
                     f"""INSERT INTO {SCHEMA}.price_history (user_id, sku, old_price, new_price, source)
                         VALUES (%s, %s, %s, %s, 'ozon_push')""",
                     (user_id, sku, old_price, price),
                 )
-
             conn.commit()
             return ok({
-                "ok":              True,
-                "sku":             sku,
-                "price":           price,
-                "old_price":       old_price,
-                "ozon_updated":    True,
+                "ok": True, "sku": sku, "price": price,
+                "old_price": old_price, "ozon_updated": True,
                 "history_recorded": abs(price - old_price) > 0.001,
             })
 
-        # ── POST / — сохранить цену локально ─────────────────────────
+        # ── POST / — сохранить локально ──────────────────────────────
         elif method == "POST":
             body = json.loads(event.get("body") or "{}")
             sku    = (body.get("sku") or "").strip()

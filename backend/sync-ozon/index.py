@@ -1,10 +1,9 @@
 import json
 import os
-import urllib.request
-import urllib.error
 import psycopg2
 from datetime import datetime, timezone, timedelta
 from collections import defaultdict
+from ozon_client import ozon_post, OzonAPIError, log_error
 
 SCHEMA = "t_p37499172_marketplace_bot"
 
@@ -15,40 +14,17 @@ CORS = {
 }
 
 
-# ── Ozon API helpers ───────────────────────────────────────────────
+# ── Ozon API fetch helpers ─────────────────────────────────────────
 
-def ozon_post(path: str, payload: dict, client_id: str, api_key: str) -> dict:
-    """POST-запрос к Ozon Seller API. Бросает RuntimeError при HTTP-ошибке."""
-    url = f"https://api-seller.ozon.ru{path}"
-    data = json.dumps(payload).encode()
-    req = urllib.request.Request(
-        url, data=data, method="POST",
-        headers={
-            "Content-Type": "application/json",
-            "Client-Id":    client_id,
-            "Api-Key":      api_key,
-        },
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=20) as resp:
-            return json.loads(resp.read().decode())
-    except urllib.error.HTTPError as e:
-        body = e.read().decode(errors="ignore")
-        raise RuntimeError(f"Ozon API {path} → HTTP {e.code}: {body[:300]}")
-
-
-def fetch_product_list(client_id: str, api_key: str) -> list[dict]:
-    """
-    POST /v2/product/list  — все товары с пагинацией (last_id cursor).
-    Поля: product_id, offer_id, ...
-    """
+def fetch_product_list(client_id: str, api_key: str, conn=None, user_id=None) -> list[dict]:
+    """POST /v2/product/list — все товары с пагинацией (last_id cursor)."""
     all_items: list[dict] = []
     last_id = ""
     while True:
         resp = ozon_post(
             "/v2/product/list",
             {"filter": {"visibility": "ALL"}, "last_id": last_id, "limit": 100},
-            client_id, api_key,
+            client_id, api_key, conn=conn, user_id=user_id, retries=1,
         )
         result = resp.get("result", {})
         items = result.get("items", [])
@@ -59,51 +35,27 @@ def fetch_product_list(client_id: str, api_key: str) -> list[dict]:
     return all_items
 
 
-def fetch_product_info(product_ids: list[int], client_id: str, api_key: str) -> dict[int, dict]:
-    """
-    POST /v2/product/info/list — названия, комиссии.
-    Возвращает dict {product_id: info}.
-    """
+def fetch_product_info(product_ids: list[int], client_id: str, api_key: str, conn=None, user_id=None) -> dict[int, dict]:
+    """POST /v2/product/info/list — названия, комиссии."""
     info_map: dict[int, dict] = {}
     for i in range(0, len(product_ids), 100):
         batch = product_ids[i:i + 100]
-        resp = ozon_post("/v2/product/info/list", {"product_id": batch}, client_id, api_key)
+        resp = ozon_post("/v2/product/info/list", {"product_id": batch},
+                         client_id, api_key, conn=conn, user_id=user_id, retries=1)
         for item in resp.get("result", {}).get("items", []):
             info_map[item["id"]] = item
     return info_map
 
 
-def fetch_prices(offer_ids: list[str], client_id: str, api_key: str) -> dict[str, dict]:
-    """
-    POST /v4/product/info/prices — цены по offer_id (SKU продавца).
-
-    Ответ (один элемент):
-    {
-      "offer_id": "...",
-      "price": {
-        "price":            "3990.00",   — базовая цена
-        "old_price":        "4490.00",   — цена до скидки (или "0")
-        "marketing_price":  "3490.00",   — цена с акцией (или "0")
-        "min_price":        "2900.00",
-        "buybox_price":     "3490.00",
-        "auto_action_enabled": "DISABLED"
-      },
-      "commissions": { "fbs_direct_flow_trans_max_amount": "...", ... }
-    }
-
-    Возвращает dict {offer_id: price_block}.
-    """
+def fetch_prices(offer_ids: list[str], client_id: str, api_key: str, conn=None, user_id=None) -> dict[str, dict]:
+    """POST /v4/product/info/prices — цены по offer_id."""
     price_map: dict[str, dict] = {}
     for i in range(0, len(offer_ids), 100):
         batch = offer_ids[i:i + 100]
         resp = ozon_post(
             "/v4/product/info/prices",
-            {
-                "filter": {"offer_id": batch, "visibility": "ALL"},
-                "last_id": "",
-                "limit":   100,
-            },
-            client_id, api_key,
+            {"filter": {"offer_id": batch, "visibility": "ALL"}, "last_id": "", "limit": 100},
+            client_id, api_key, conn=conn, user_id=user_id, retries=1,
         )
         for item in resp.get("result", {}).get("items", []):
             oid = item.get("offer_id")
@@ -112,22 +64,15 @@ def fetch_prices(offer_ids: list[str], client_id: str, api_key: str) -> dict[str
     return price_map
 
 
-def fetch_stocks(product_ids: list[int], client_id: str, api_key: str) -> dict[int, int]:
-    """
-    POST /v3/product/info/stocks — остатки по складам.
-    Возвращает dict {product_id: total_present}.
-    """
+def fetch_stocks(product_ids: list[int], client_id: str, api_key: str, conn=None, user_id=None) -> dict[int, int]:
+    """POST /v3/product/info/stocks — остатки по складам."""
     stock_map: dict[int, int] = {}
     for i in range(0, len(product_ids), 100):
         batch = product_ids[i:i + 100]
         resp = ozon_post(
             "/v3/product/info/stocks",
-            {
-                "filter": {"product_id": [str(pid) for pid in batch], "visibility": "ALL"},
-                "last_id": "",
-                "limit": 100,
-            },
-            client_id, api_key,
+            {"filter": {"product_id": [str(pid) for pid in batch], "visibility": "ALL"}, "last_id": "", "limit": 100},
+            client_id, api_key, conn=conn, user_id=user_id, retries=1,
         )
         for s in resp.get("result", {}).get("items", []):
             pid = s.get("product_id")
@@ -163,7 +108,7 @@ def sync_ozon_products(user_id: str, client_id: str, api_key: str, conn) -> dict
     cur = conn.cursor()
     try:
         # ── 1. Список товаров ─────────────────────────────────────────
-        raw_items = fetch_product_list(client_id, api_key)
+        raw_items = fetch_product_list(client_id, api_key, conn=conn, user_id=user_id)
         if not raw_items:
             return {"synced": 0, "prices_updated": 0, "products": []}
 
@@ -175,13 +120,13 @@ def sync_ozon_products(user_id: str, client_id: str, api_key: str, conn) -> dict
         all_offer_ids = list(offer_map.values())
 
         # ── 2. Детали (название, комиссия FBO) ───────────────────────
-        info_map = fetch_product_info(product_ids, client_id, api_key)
+        info_map = fetch_product_info(product_ids, client_id, api_key, conn=conn, user_id=user_id)
 
         # ── 3. Цены через /v4/product/info/prices ────────────────────
-        price_map = fetch_prices(all_offer_ids, client_id, api_key)
+        price_map = fetch_prices(all_offer_ids, client_id, api_key, conn=conn, user_id=user_id)
 
         # ── 4. Остатки ───────────────────────────────────────────────
-        stock_map = fetch_stocks(product_ids, client_id, api_key)
+        stock_map = fetch_stocks(product_ids, client_id, api_key, conn=conn, user_id=user_id)
 
         # ── 5. Upsert ─────────────────────────────────────────────────
         result:         list[dict] = []
@@ -279,7 +224,7 @@ def sync_ozon_products(user_id: str, client_id: str, api_key: str, conn) -> dict
 
 # ── Sales sync ────────────────────────────────────────────────────
 
-def fetch_fbo_sales(client_id: str, api_key: str, days: int = 30) -> list[dict]:
+def fetch_fbo_sales(client_id: str, api_key: str, days: int = 30, conn=None, user_id=None) -> list[dict]:
     """
     POST /v2/posting/fbo/list — список FBO-отправлений за последние N дней.
 
@@ -308,20 +253,13 @@ def fetch_fbo_sales(client_id: str, api_key: str, days: int = 30) -> list[dict]:
             "/v2/posting/fbo/list",
             {
                 "dir":    "asc",
-                "filter": {
-                    "since":  since,
-                    "to":     until,
-                    "status": "",          # "" = все статусы
-                },
+                "filter": {"since": since, "to": until, "status": ""},
                 "limit":  limit,
                 "offset": offset,
-                "translit":       False,
-                "with": {
-                    "analytics_data":  False,
-                    "financial_data":  False,
-                },
+                "translit": False,
+                "with": {"analytics_data": False, "financial_data": False},
             },
-            client_id, api_key,
+            client_id, api_key, conn=conn, user_id=user_id, retries=1,
         )
         result   = resp.get("result", [])
         postings = result if isinstance(result, list) else result.get("postings", [])
@@ -375,7 +313,7 @@ def sync_ozon_sales(user_id: str, client_id: str, api_key: str, conn, days: int 
         since = now - timedelta(days=days)
 
         # ── 1. Список FBO-отправлений ─────────────────────────────────
-        postings = fetch_fbo_sales(client_id, api_key, days)
+        postings = fetch_fbo_sales(client_id, api_key, days, conn=conn, user_id=user_id)
 
         # ── 2. Агрегация по SKU ───────────────────────────────────────
         by_sku = aggregate_sales(postings)

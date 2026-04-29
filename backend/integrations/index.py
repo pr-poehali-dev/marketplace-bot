@@ -68,13 +68,32 @@ def verify_ozon_credentials(client_id: str, api_key: str) -> tuple[bool, str]:
         return False, f"Не удалось подключиться к Ozon API: {e}"
 
 
-def verify_wb_token(api_token: str) -> tuple[bool, str]:
+def log_api_error(conn, user_id, endpoint: str, status_code: int, error: str) -> None:
+    """Пишет ошибку в api_logs. Не бросает исключений."""
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            f"""INSERT INTO {SCHEMA}.api_logs
+                (user_id, platform, endpoint, status_code, error)
+                VALUES (%s, 'wb', %s, %s, %s)""",
+            (user_id, endpoint, status_code, error[:2000]),
+        )
+        conn.commit()
+        cur.close()
+    except Exception:
+        pass
+
+
+def verify_wb_token(api_token: str, conn=None, user_id=None) -> tuple[bool, str]:
     """
     Проверяет WB API-токен через Seller API.
     GET /api/v3/warehouses — лёгкий GET-запрос без изменений данных.
-    Документация: https://openapi.wildberries.ru/
+
+    Возвращает (valid, error_message).
+    Все ошибки логируются в api_logs.
     """
-    url = "https://marketplace-api.wildberries.ru/api/v3/warehouses"
+    endpoint = "/api/v3/warehouses"
+    url = "https://marketplace-api.wildberries.ru" + endpoint
     req = urllib.request.Request(
         url,
         method="GET",
@@ -82,19 +101,35 @@ def verify_wb_token(api_token: str) -> tuple[bool, str]:
     )
     try:
         with urllib.request.urlopen(req, timeout=10) as resp:
-            # 200 или 204 — токен действителен
             return resp.status in (200, 204), ""
+
     except urllib.error.HTTPError as e:
+        body = ""
+        try:
+            body = e.read().decode(errors="ignore")[:300]
+        except Exception:
+            pass
+
         if e.code == 401:
-            return False, "Неверный API-токен Wildberries"
-        if e.code == 403:
-            return False, "Доступ запрещён — проверьте разрешения токена в кабинете WB"
-        if e.code == 429:
-            # Rate limit — токен скорее всего валиден
-            return True, ""
-        return False, f"Wildberries API вернул ошибку {e.code}"
+            msg = "Неверный токен Wildberries"
+        elif e.code == 403:
+            msg = "Доступ запрещён — проверьте разрешения токена в кабинете WB"
+        elif e.code == 429:
+            msg = "Слишком много запросов WB, попробуйте позже"
+        elif e.code >= 500:
+            msg = "Wildberries временно недоступен"
+        else:
+            msg = f"Wildberries API вернул ошибку {e.code}"
+
+        if conn:
+            log_api_error(conn, user_id, endpoint, e.code, f"{msg}. Body: {body}")
+        return False, msg
+
     except Exception as e:
-        return False, f"Не удалось подключиться к Wildberries API: {e}"
+        msg = f"Не удалось подключиться к Wildberries API: {e}"
+        if conn:
+            log_api_error(conn, user_id, endpoint, 0, msg)
+        return False, msg
 
 
 def mask_token(token: str | None) -> str | None:
@@ -206,7 +241,7 @@ def handler(event: dict, context) -> dict:
             elif platform == "wb":
                 if not api_key:
                     return err("Для Wildberries нужен api_key (токен)")
-                valid, error = verify_wb_token(api_key)
+                valid, error = verify_wb_token(api_key, conn=conn, user_id=user_id)
                 return ok({"valid": valid, "error": error if not valid else None})
 
             return err(f"Проверка не поддерживается для платформы: {platform}")
@@ -232,9 +267,10 @@ def handler(event: dict, context) -> dict:
                     return err(f"Проверка Ozon API не прошла: {error}", 422)
 
             elif platform == "wb":
-                valid, error = verify_wb_token(api_key)
+                valid, error = verify_wb_token(api_key, conn=conn, user_id=user_id)
                 if not valid:
-                    return err(f"Проверка Wildberries API не прошла: {error}", 422)
+                    # Возвращаем точный текст ошибки от WB (без префикса)
+                    return err(error, 422)
 
             cur.execute(
                 f"""INSERT INTO {SCHEMA}.integrations (user_id, platform, api_key, client_id)

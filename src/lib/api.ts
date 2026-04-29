@@ -89,11 +89,11 @@ export async function apiGetPrices() {
   return parseResponse(res);
 }
 
-export async function apiSavePrice(sku: string, price: number) {
+export async function apiSavePrice(sku: string, price: number, source = "manual") {
   const res = await fetch(PRICES_URL, {
     method: "POST",
     headers: authHeaders(),
-    body: JSON.stringify({ sku, price }),
+    body: JSON.stringify({ sku, price, source }),
   });
   return parseResponse(res);
 }
@@ -132,6 +132,14 @@ export async function apiSyncProducts(platform: "ozon" | "wb" | "all" = "all") {
 // ── Price Recommendations ─────────────────────────────────────────
 
 const PRICE_REC_URL = "https://functions.poehali.dev/41ea5b72-9eb3-410a-9a2d-0537e2df1d24";
+
+export async function apiGetPriceHistory(sku: string) {
+  const res = await fetch(`${PRICES_URL}?action=history&sku=${encodeURIComponent(sku)}`, {
+    method: "GET",
+    headers: authHeaders(),
+  });
+  return parseResponse(res);
+}
 
 export async function apiGetRecommendations() {
   const res = await fetch(PRICE_REC_URL, {

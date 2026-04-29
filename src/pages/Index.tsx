@@ -1,7 +1,7 @@
 import { useState, useMemo, useEffect, useCallback } from "react";
 import Icon from "@/components/ui/icon";
 import { useAuth } from "@/hooks/useAuth";
-import { apiGetProducts, apiGetPrices, apiSavePrice, apiSyncProducts, apiGetRecommendations } from "@/lib/api";
+import { apiGetProducts, apiGetPrices, apiSavePrice, apiSyncProducts, apiGetRecommendations, apiGetPriceHistory } from "@/lib/api";
 
 type Section = "sync" | "analytics" | "finance" | "pricing" | "products" | "orders" | "settings";
 type Platform = "all" | "ozon" | "wb";
@@ -277,6 +277,144 @@ function calcMetrics(product: typeof CALC_PRODUCTS[0], price: number) {
   return { commission, returns, totalExpenses, profit, margin, roi, breakeven };
 }
 
+// ── Price History Modal ───────────────────────────────────────────
+interface HistoryEntry {
+  id: string;
+  sku: string;
+  old_price: number;
+  new_price: number;
+  source: string;
+  created_at: string;
+}
+
+function PriceHistoryModal({ sku, name, onClose }: { sku: string; name: string; onClose: () => void }) {
+  const [history, setHistory] = useState<HistoryEntry[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    apiGetPriceHistory(sku).then((data) => {
+      if (data?.history) setHistory(data.history);
+      setLoading(false);
+    });
+  }, [sku]);
+
+  function formatDate(iso: string) {
+    try {
+      return new Date(iso).toLocaleString("ru-RU", {
+        day: "2-digit", month: "short", year: "numeric",
+        hour: "2-digit", minute: "2-digit",
+      });
+    } catch { return iso; }
+  }
+
+  const sourceLabel: Record<string, string> = {
+    manual: "Вручную",
+    recommendation: "Рекомендация",
+    calculator: "Калькулятор",
+  };
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center p-4"
+      style={{ background: "rgba(0,0,0,0.7)" }}
+      onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
+    >
+      <div
+        className="w-full max-w-lg rounded-xl border border-border overflow-hidden"
+        style={{ background: "hsl(220,14%,9%)", maxHeight: "80vh", display: "flex", flexDirection: "column" }}
+      >
+        {/* Header */}
+        <div className="flex items-center justify-between px-5 py-4 border-b border-border shrink-0">
+          <div>
+            <p className="text-sm font-semibold text-foreground">История цен</p>
+            <p className="text-xs text-muted-foreground mt-0.5">{name} · {sku}</p>
+          </div>
+          <button
+            onClick={onClose}
+            className="w-7 h-7 flex items-center justify-center rounded hover:bg-secondary text-muted-foreground hover:text-foreground transition-colors"
+          >
+            <Icon name="X" size={15} />
+          </button>
+        </div>
+
+        {/* Content */}
+        <div className="overflow-y-auto flex-1">
+          {loading ? (
+            <div className="flex items-center justify-center py-12 text-muted-foreground gap-2">
+              <Icon name="Loader2" size={16} className="animate-spin" />
+              <span className="text-sm">Загрузка...</span>
+            </div>
+          ) : history.length === 0 ? (
+            <div className="flex flex-col items-center justify-center py-12 gap-2 text-muted-foreground">
+              <Icon name="Clock" size={24} className="opacity-30" />
+              <p className="text-sm">История изменений пуста</p>
+              <p className="text-xs opacity-60">Цена ещё не менялась</p>
+            </div>
+          ) : (
+            <div className="relative">
+              {/* Vertical timeline line */}
+              <div className="absolute left-8 top-0 bottom-0 w-px" style={{ background: "hsl(220,12%,18%)" }} />
+              <div className="py-4 space-y-0">
+                {history.map((entry, idx) => {
+                  const delta = entry.new_price - entry.old_price;
+                  const isUp = delta > 0;
+                  const color = isUp ? "text-green-400" : "text-red-400";
+                  const dotColor = isUp ? "#4ade80" : "#f87171";
+                  return (
+                    <div key={entry.id} className="flex gap-4 px-5 py-3 hover:bg-secondary/30 transition-colors">
+                      {/* Dot */}
+                      <div className="relative z-10 shrink-0 mt-1">
+                        <div
+                          className="w-3 h-3 rounded-full border-2"
+                          style={{ background: idx === 0 ? dotColor : "hsl(220,14%,9%)", borderColor: dotColor }}
+                        />
+                      </div>
+                      {/* Content */}
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center justify-between gap-2">
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <span className="text-sm font-mono-num font-medium text-muted-foreground line-through">
+                              {entry.old_price.toLocaleString("ru-RU")} ₽
+                            </span>
+                            <Icon name="ArrowRight" size={12} className="text-muted-foreground shrink-0" />
+                            <span className={`text-sm font-mono-num font-semibold ${color}`}>
+                              {entry.new_price.toLocaleString("ru-RU")} ₽
+                            </span>
+                            <span className={`text-xs font-mono-num ${color}`}>
+                              ({isUp ? "+" : ""}{delta.toLocaleString("ru-RU")} ₽ / {isUp ? "+" : ""}{((delta / (entry.old_price || 1)) * 100).toFixed(1)}%)
+                            </span>
+                          </div>
+                        </div>
+                        <div className="flex items-center gap-2 mt-0.5">
+                          <span className="text-[10px] px-1.5 py-0.5 rounded border border-border text-muted-foreground" style={{ background: "hsl(220,16%,6%)" }}>
+                            {sourceLabel[entry.source] ?? entry.source}
+                          </span>
+                          <span className="text-[10px] text-muted-foreground">{formatDate(entry.created_at)}</span>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* Footer */}
+        <div className="px-5 py-3 border-t border-border shrink-0 flex items-center justify-between">
+          <span className="text-xs text-muted-foreground">{history.length} записей</span>
+          <button
+            onClick={onClose}
+            className="text-sm px-4 py-1.5 rounded border border-border text-muted-foreground hover:text-foreground transition-colors"
+          >
+            Закрыть
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ── Price Calc Dialog ─────────────────────────────────────────────
 function PriceCalcDialog({
   product,
@@ -543,6 +681,9 @@ export default function Index() {
   const [lastSyncTime, setLastSyncTime] = useState<string | null>(null);
   const [syncCooldown, setSyncCooldown] = useState(false);
 
+  // Price history modal
+  const [historyModal, setHistoryModal] = useState<{ sku: string; name: string } | null>(null);
+
   // Dialog state
   const [calcDialogProduct, setCalcDialogProduct] = useState<typeof CALC_PRODUCTS[0] | null>(null);
   const [calcDialogInitPrice, setCalcDialogInitPrice] = useState<number | undefined>(undefined);
@@ -605,12 +746,12 @@ export default function Index() {
 
   async function applyPrice(price: number) {
     if (!calcDialogProduct) return;
-    await applyPriceBySku(calcDialogProduct.sku, price);
+    await applyPriceBySku(calcDialogProduct.sku, price, "calculator");
   }
 
-  async function applyPriceBySku(sku: string, price: number) {
+  async function applyPriceBySku(sku: string, price: number, source = "manual") {
     setAppliedPrices((prev) => ({ ...prev, [sku]: price }));
-    await apiSavePrice(sku, price);
+    await apiSavePrice(sku, price, source);
   }
 
   async function handleSync() {
@@ -643,6 +784,15 @@ export default function Index() {
 
   return (
     <div className="flex h-screen bg-background overflow-hidden font-['IBM_Plex_Sans',sans-serif]">
+      {/* Price history modal */}
+      {historyModal && (
+        <PriceHistoryModal
+          sku={historyModal.sku}
+          name={historyModal.name}
+          onClose={() => setHistoryModal(null)}
+        />
+      )}
+
       {/* Price calc dialog */}
       {calcDialogProduct && (
         <PriceCalcDialog
@@ -1256,7 +1406,7 @@ export default function Index() {
                                     </p>
                                     <p className="text-[10px] text-muted-foreground leading-snug line-clamp-2">{rec.reason}</p>
                                     <button
-                                      onClick={() => applyPriceBySku(p.sku, rec.recommended_price)}
+                                      onClick={() => applyPriceBySku(p.sku, rec.recommended_price, "recommendation")}
                                       className={`mt-1.5 text-[10px] px-2 py-0.5 rounded border font-medium transition-all hover:opacity-80 ${recColor.text} ${recColor.border} ${recColor.bg}`}
                                     >
                                       Применить рекомендацию
@@ -1268,13 +1418,23 @@ export default function Index() {
                               )}
                             </td>
                             <td className="px-4 py-3 text-right">
-                              <button
-                                onClick={() => openCalcDialog(p.name)}
-                                className="flex items-center gap-1 text-xs px-2.5 py-1 rounded border border-border hover:border-primary/50 text-muted-foreground hover:text-foreground transition-all ml-auto"
-                              >
-                                <Icon name="BarChart2" size={11} />
-                                Детали
-                              </button>
+                              <div className="flex items-center justify-end gap-1.5">
+                                <button
+                                  onClick={() => setHistoryModal({ sku: p.sku, name: p.name })}
+                                  className="flex items-center gap-1 text-xs px-2.5 py-1 rounded border border-border hover:border-primary/50 text-muted-foreground hover:text-foreground transition-all"
+                                  title="История цен"
+                                >
+                                  <Icon name="Clock" size={11} />
+                                  История
+                                </button>
+                                <button
+                                  onClick={() => openCalcDialog(p.name)}
+                                  className="flex items-center gap-1 text-xs px-2.5 py-1 rounded border border-border hover:border-primary/50 text-muted-foreground hover:text-foreground transition-all"
+                                >
+                                  <Icon name="BarChart2" size={11} />
+                                  Детали
+                                </button>
+                              </div>
                             </td>
                           </tr>
                         );

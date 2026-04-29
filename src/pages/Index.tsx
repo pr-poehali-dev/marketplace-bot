@@ -2338,7 +2338,12 @@ export default function Index() {
                           setWbStatus(null);
                           const data = await apiSyncWb();
                           if (data?.ok) {
-                            setWbStatus({ ok: true, msg: `Синхронизировано ${data.synced} товаров из Wildberries` });
+                            const changed = data.log?.prices_changed ?? 0;
+                            const updated = data.log?.prices_updated ?? data.prices_updated ?? 0;
+                            setWbStatus({
+                              ok: true,
+                              msg: `WB: ${data.synced} товаров · цен обновлено: ${updated}${changed > 0 ? ` · изменилось: ${changed}` : ""}`,
+                            });
                             setWbIntegration(prev => prev ? { ...prev, last_sync_at: new Date().toISOString() } : prev);
                             await loadData();
                           } else {

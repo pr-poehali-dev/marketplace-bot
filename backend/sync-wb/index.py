@@ -195,25 +195,52 @@ def fetch_wb_stocks(api_token: str, conn=None, user_id=None) -> dict[int, int]:
     return stock_map
 
 
-def fetch_wb_prices(api_token: str, conn=None, user_id=None) -> dict[int, float]:
+def fetch_wb_prices(api_token: str, conn=None, user_id=None) -> dict[int, dict]:
     """
-    GET /public/api/v1/info?quantity=0
-    Возвращает dict {nmId: price}.
+    GET https://discounts-prices-api.wildberries.ru/api/v2/list/goods/filter
+
+    Возвращает dict { nmID: { price, discounted_price } }.
+
+    Поля ответа (goods[]):
+      nmID            — артикул WB
+      price           — цена до скидки (базовая)
+      discountedPrice — цена со скидкой продавца (итоговая для покупателя)
     """
-    price_map: dict[int, float] = {}
-    path = "/public/api/v1/info"
-    try:
-        resp = wb_get(path, api_token,
-                      base_url="https://suppliers-api.wildberries.ru",
-                      params={"quantity": "0"})
-        for item in resp if isinstance(resp, list) else []:
-            nm_id = item.get("nmId")
-            price = item.get("price", 0)
+    WB_PRICES_API = "https://discounts-prices-api.wildberries.ru"
+    price_map: dict[int, dict] = {}
+    offset = 0
+    limit  = 1000
+    path   = "/api/v2/list/goods/filter"
+
+    while True:
+        try:
+            resp = wb_get(
+                path, api_token,
+                base_url=WB_PRICES_API,
+                params={"limit": limit, "offset": offset},
+            )
+        except WBAPIError as e:
+            if conn:
+                log_error(conn, user_id, path, e.status_code, str(e))
+            break   # Не критично — вернём что успели собрать
+
+        data    = resp.get("data", {})
+        goods   = data.get("listGoods", [])
+
+        for item in goods:
+            nm_id  = item.get("nmID") or item.get("nmId")
+            price  = float(item.get("price", 0) or 0)
+            disc   = float(item.get("discountedPrice", 0) or 0)
             if nm_id:
-                price_map[int(nm_id)] = float(price)
-    except WBAPIError as e:
-        if conn:
-            log_error(conn, user_id, path, e.status_code, str(e))
+                price_map[int(nm_id)] = {
+                    "price":            price,          # цена до скидки (old_price)
+                    "discounted_price": disc if disc > 0 else price,  # итоговая цена
+                }
+
+        if len(goods) < limit:
+            break
+        offset += limit
+
     return price_map
 
 
@@ -222,33 +249,31 @@ def fetch_wb_prices(api_token: str, conn=None, user_id=None) -> dict[int, float]
 def sync_wb_products(user_id: str, api_token: str, conn) -> dict:
     """
     Синхронизация товаров WB.
-    1. /content/v2/get/cards/list  — список карточек (nmID, title, vendorCode, sizes)
-    2. /api/v3/warehouses + /api/v3/stocks/{id} — остатки по складам
-    3. /public/api/v1/info — текущие цены
-    4. Upsert в products (user_id + sku)
-
-    Поля:
-      sku  = nmID (артикул WB)
-      name = title
-      stock = сумма по всем складам
-      current_price = из прайса WB
-      platform = 'WB'
+    1. /content/v2/get/cards/list        — карточки (nmID, title, vendorCode)
+    2. /api/v3/warehouses + stocks       — остатки по складам
+    3. /api/v2/list/goods/filter         — цены (price, discountedPrice)
+    4. Upsert в products:
+       - current_price = discountedPrice (цена покупателя)
+       - old_price     = price (цена до скидки), если отличается
+       - applied_prices НЕ трогаем
+    5. Возвращает { synced, prices_updated, products[] }
     """
     cur = conn.cursor()
     try:
         # ── 1. Карточки товаров ───────────────────────────────────────
         cards = fetch_wb_cards(api_token, conn=conn, user_id=user_id)
         if not cards:
-            return {"synced": 0, "products": []}
+            return {"synced": 0, "prices_updated": 0, "products": []}
 
         # ── 2. Остатки ────────────────────────────────────────────────
         stock_map = fetch_wb_stocks(api_token, conn=conn, user_id=user_id)
 
-        # ── 3. Цены ───────────────────────────────────────────────────
+        # ── 3. Цены из нового эндпоинта ───────────────────────────────
         price_map = fetch_wb_prices(api_token, conn=conn, user_id=user_id)
 
         # ── 4. Upsert ─────────────────────────────────────────────────
-        result: list[dict] = []
+        result:        list[dict] = []
+        prices_updated: int = 0
 
         for card in cards:
             nm_id       = card.get("nmID") or card.get("nmId")
@@ -260,25 +285,37 @@ def sync_wb_products(user_id: str, api_token: str, conn) -> dict:
 
             sku   = str(nm_id)
             stock = stock_map.get(int(nm_id), 0)
-            price = price_map.get(int(nm_id), 0.0)
 
-            # Дефолты для расчётов (обновить когда будет аналитика)
-            cost_price            = round(price * 0.45, 2) if price > 0 else 0.0
-            commission_pct        = 12.0   # средняя комиссия WB ~12%
-            logistics_cost        = 80.0   # FBS-логистика
+            p_data         = price_map.get(int(nm_id), {})
+            current_price  = p_data.get("discounted_price", 0.0)   # итоговая цена покупателя
+            base_price     = p_data.get("price", 0.0)              # цена до скидки
+            # old_price показываем только если реально есть скидка
+            old_price      = base_price if base_price > current_price > 0 else None
+
+            cost_price            = round(current_price * 0.45, 2) if current_price > 0 else 0.0
+            commission_pct        = 12.0
+            logistics_cost        = 80.0
             storage_cost_per_unit = 8.0
             ads_cost_per_unit     = 60.0
-            return_rate_pct       = 7.0    # WB ~7%
+            return_rate_pct       = 7.0
 
+            # Upsert с сохранением old_price при смене цены.
+            # applied_prices — отдельная таблица, здесь не трогаем.
             cur.execute(
                 f"""INSERT INTO {SCHEMA}.products
-                    (user_id, sku, name, platform, current_price, cost_price,
+                    (user_id, sku, name, platform, current_price, old_price, cost_price,
                      commission_pct, logistics_cost, storage_cost_per_unit,
                      ads_cost_per_unit, return_rate_pct, stock, updated_at)
-                    VALUES (%s,%s,%s,'WB',%s,%s,%s,%s,%s,%s,%s,%s,NOW())
+                    VALUES (%s,%s,%s,'WB',%s,%s,%s,%s,%s,%s,%s,%s,%s,NOW())
                     ON CONFLICT (user_id, sku) DO UPDATE SET
                       name                  = EXCLUDED.name,
                       platform              = 'WB',
+                      old_price             = CASE
+                                                WHEN EXCLUDED.current_price > 0
+                                                 AND products.current_price <> EXCLUDED.current_price
+                                                THEN products.current_price
+                                                ELSE EXCLUDED.old_price
+                                              END,
                       current_price         = CASE WHEN EXCLUDED.current_price > 0
                                                    THEN EXCLUDED.current_price
                                                    ELSE products.current_price END,
@@ -289,25 +326,39 @@ def sync_wb_products(user_id: str, api_token: str, conn) -> dict:
                       ads_cost_per_unit     = EXCLUDED.ads_cost_per_unit,
                       return_rate_pct       = EXCLUDED.return_rate_pct,
                       stock                 = EXCLUDED.stock,
-                      updated_at            = NOW()""",
+                      updated_at            = NOW()
+                    RETURNING
+                      (xmax <> 0) AS was_update,
+                      (products.current_price IS DISTINCT FROM EXCLUDED.current_price
+                       AND EXCLUDED.current_price > 0) AS price_changed""",
                 (
                     user_id, sku, title,
-                    price, cost_price, commission_pct,
-                    logistics_cost, storage_cost_per_unit, ads_cost_per_unit,
-                    return_rate_pct, stock,
+                    current_price, old_price, cost_price,
+                    commission_pct, logistics_cost, storage_cost_per_unit,
+                    ads_cost_per_unit, return_rate_pct, stock,
                 ),
             )
+            row = cur.fetchone()
+            if row and row[0]:    # was_update
+                prices_updated += 1
 
             result.append({
-                "sku":         sku,
-                "name":        title,
-                "vendor_code": vendor_code,
-                "price":       price,
-                "stock":       stock,
+                "sku":           sku,
+                "name":          title,
+                "vendor_code":   vendor_code,
+                "price":         current_price,
+                "old_price":     old_price,
+                "stock":         stock,
+                "price_changed": bool(row and row[1]) if row else False,
             })
 
         conn.commit()
-        return {"synced": len(result), "products": result}
+        return {
+            "synced":         len(result),
+            "prices_updated": prices_updated,
+            "prices_changed": sum(1 for p in result if p.get("price_changed")),
+            "products":       result,
+        }
 
     finally:
         cur.close()
@@ -427,10 +478,17 @@ def handler(event: dict, context) -> dict:
         conn.commit()
 
         return ok({
-            "ok":       True,
-            "platform": "wb",
-            "synced":   stats["synced"],
-            "products": stats["products"],
+            "ok":             True,
+            "platform":       "wb",
+            "synced":         stats["synced"],
+            "prices_updated": stats["prices_updated"],
+            "prices_changed": stats["prices_changed"],
+            "products":       stats["products"],
+            "log": {
+                "total_products":  stats["synced"],
+                "prices_updated":  stats["prices_updated"],
+                "prices_changed":  stats["prices_changed"],
+            },
         })
 
     except Exception as e:

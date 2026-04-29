@@ -1,5 +1,7 @@
-import { useState, useMemo } from "react";
+import { useState, useMemo, useEffect, useCallback } from "react";
 import Icon from "@/components/ui/icon";
+import { useAuth } from "@/hooks/useAuth";
+import { apiGetProducts, apiGetPrices, apiSavePrice, apiSyncProducts } from "@/lib/api";
 
 type Section = "sync" | "analytics" | "finance" | "pricing" | "products" | "orders" | "settings";
 type Platform = "all" | "ozon" | "wb";
@@ -480,19 +482,97 @@ function PriceCalcDialog({
   );
 }
 
+interface DBProduct {
+  sku: string;
+  name: string;
+  platform: string;
+  current_price: number;
+  cost_price: number;
+  commission_pct: number;
+  logistics_cost: number;
+  storage_cost_per_unit: number;
+  ads_cost_per_unit: number;
+  return_rate_pct: number;
+  sales: number;
+  stock: number;
+  revenue: number;
+  applied_price: number;
+  updated_at: string;
+}
+
+function dbProductToCalc(p: DBProduct): typeof CALC_PRODUCTS[0] {
+  return {
+    id: 0,
+    name: p.name,
+    sku: p.sku,
+    platform: p.platform as "Ozon" | "WB",
+    currentPrice: p.current_price,
+    costPrice: p.cost_price,
+    commissionPct: p.commission_pct,
+    logisticsCost: p.logistics_cost,
+    storageCostPerUnit: p.storage_cost_per_unit,
+    adsCostPerUnit: p.ads_cost_per_unit,
+    returnRatePct: p.return_rate_pct,
+  };
+}
+
 export default function Index() {
+  const { user, logout } = useAuth();
   const [activeSection, setActiveSection] = useState<Section>("analytics");
   const [platform, setPlatform] = useState<Platform>("all");
   const [notifOpen, setNotifOpen] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(true);
 
+  // DB products state
+  const [dbProducts, setDbProducts] = useState<DBProduct[]>([]);
+  const [dbLoaded, setDbLoaded] = useState(false);
+  const [syncing, setSyncing] = useState(false);
+  const [syncError, setSyncError] = useState("");
+  const [lastSyncTime, setLastSyncTime] = useState<string | null>(null);
+  const [syncCooldown, setSyncCooldown] = useState(false);
+
   // Dialog state
   const [calcDialogProduct, setCalcDialogProduct] = useState<typeof CALC_PRODUCTS[0] | null>(null);
   const [calcDialogInitPrice, setCalcDialogInitPrice] = useState<number | undefined>(undefined);
-  // sku → applied price
+  // sku → applied price (local + synced from DB)
   const [appliedPrices, setAppliedPrices] = useState<Record<string, number>>({});
 
+  // Load products + prices from DB
+  const loadData = useCallback(async () => {
+    const [prodData, priceData] = await Promise.all([apiGetProducts(), apiGetPrices()]);
+    if (prodData?.products) {
+      setDbProducts(prodData.products);
+      // sync_log
+      if (prodData.last_sync?.length > 0) {
+        setLastSyncTime(prodData.last_sync[0].finished_at);
+        // check cooldown (last success < 1h ago)
+        const lastSuccess = prodData.last_sync.find((s: { status: string }) => s.status === "success");
+        if (lastSuccess) {
+          const diff = Date.now() - new Date(lastSuccess.started_at).getTime();
+          setSyncCooldown(diff < 60 * 60 * 1000);
+        }
+      }
+    }
+    if (priceData?.prices) {
+      const mapped: Record<string, number> = {};
+      for (const [sku, val] of Object.entries(priceData.prices)) {
+        mapped[sku] = (val as { price: number }).price;
+      }
+      setAppliedPrices(mapped);
+    }
+    setDbLoaded(true);
+  }, []);
+
+  useEffect(() => { loadData(); }, [loadData]);
+
   function openCalcDialog(productName: string, initPrice?: number) {
+    // Try DB product first, fallback to static CALC_PRODUCTS
+    const dbP = dbProducts.find((p) => p.name === productName);
+    if (dbP) {
+      setCalcDialogProduct(dbProductToCalc(dbP));
+      setCalcDialogInitPrice(initPrice ?? appliedPrices[dbP.sku] ?? dbP.current_price);
+      return;
+    }
     const found = CALC_PRODUCTS.find((p) => p.name === productName);
     if (found) {
       setCalcDialogProduct(found);
@@ -500,9 +580,24 @@ export default function Index() {
     }
   }
 
-  function applyPrice(price: number) {
+  async function applyPrice(price: number) {
     if (!calcDialogProduct) return;
-    setAppliedPrices((prev) => ({ ...prev, [calcDialogProduct.sku]: price }));
+    const sku = calcDialogProduct.sku;
+    setAppliedPrices((prev) => ({ ...prev, [sku]: price }));
+    await apiSavePrice(sku, price);
+  }
+
+  async function handleSync() {
+    if (syncing || syncCooldown) return;
+    setSyncing(true);
+    setSyncError("");
+    const data = await apiSyncProducts("all");
+    if (data?.error) {
+      setSyncError(data.error);
+    } else {
+      await loadData();
+    }
+    setSyncing(false);
   }
 
 
@@ -627,8 +722,19 @@ export default function Index() {
               )}
             </div>
 
-            <div className="w-7 h-7 rounded-full flex items-center justify-center text-xs font-bold text-white" style={{ background: "hsl(210,100%,56%)" }}>
-              ИП
+            <div className="flex items-center gap-2">
+              <div className="w-7 h-7 rounded-full flex items-center justify-center text-xs font-bold text-white shrink-0" style={{ background: "hsl(210,100%,56%)" }}>
+                {user?.name ? user.name[0].toUpperCase() : "U"}
+              </div>
+              {sidebarOpen && (
+                <button
+                  onClick={logout}
+                  title="Выйти"
+                  className="w-7 h-7 flex items-center justify-center rounded text-muted-foreground hover:text-red-400 hover:bg-red-400/10 transition-colors"
+                >
+                  <Icon name="LogOut" size={14} />
+                </button>
+              )}
             </div>
           </div>
         </header>
@@ -985,15 +1091,35 @@ export default function Index() {
           {/* ── PRODUCTS ── */}
           {activeSection === "products" && (
             <div className="space-y-4">
-              <div className="flex items-center justify-between">
+              <div className="flex items-center justify-between gap-3 flex-wrap">
                 <div className="flex items-center gap-2 border border-border rounded px-3 py-2 w-64" style={{ background: "hsl(220,14%,9%)" }}>
                   <Icon name="Search" size={14} className="text-muted-foreground" />
                   <input className="bg-transparent text-sm text-foreground placeholder:text-muted-foreground outline-none w-full" placeholder="Поиск по каталогу..." />
                 </div>
-                <button className="flex items-center gap-2 text-sm px-4 py-2 rounded text-white" style={{ background: platformAccent }}>
-                  <Icon name="Plus" size={14} />
-                  Добавить товар
-                </button>
+                <div className="flex items-center gap-2">
+                  {/* Sync info */}
+                  {lastSyncTime && (
+                    <span className="text-xs text-muted-foreground hidden sm:block">
+                      Обновлено: {new Date(lastSyncTime).toLocaleString("ru-RU", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" })}
+                    </span>
+                  )}
+                  {syncError && (
+                    <span className="text-xs text-red-400 max-w-xs truncate">{syncError}</span>
+                  )}
+                  <button
+                    onClick={handleSync}
+                    disabled={syncing || syncCooldown}
+                    title={syncCooldown ? "Синхронизация доступна раз в час" : "Синхронизировать товары"}
+                    className="flex items-center gap-1.5 text-sm px-3 py-2 rounded border border-border hover:border-primary/50 text-muted-foreground hover:text-foreground transition-all disabled:opacity-40 disabled:cursor-not-allowed"
+                  >
+                    <Icon name="RefreshCw" size={14} className={syncing ? "animate-spin" : ""} />
+                    {syncing ? "Синхронизация..." : syncCooldown ? "Недоступно (1ч)" : "Синхронизировать"}
+                  </button>
+                  <button className="flex items-center gap-2 text-sm px-4 py-2 rounded text-white" style={{ background: platformAccent }}>
+                    <Icon name="Plus" size={14} />
+                    Добавить товар
+                  </button>
+                </div>
               </div>
               <div className="rounded-lg border border-border overflow-hidden" style={{ background: "hsl(220,14%,9%)" }}>
                 <table className="w-full text-sm">
@@ -1010,7 +1136,71 @@ export default function Index() {
                     </tr>
                   </thead>
                   <tbody>
-                    {d.products.map((p) => {
+                    {/* Loading state */}
+                    {!dbLoaded && (
+                      <tr>
+                        <td colSpan={8} className="px-4 py-8 text-center text-sm text-muted-foreground">
+                          <Icon name="Loader2" size={16} className="animate-spin inline mr-2" />
+                          Загрузка товаров...
+                        </td>
+                      </tr>
+                    )}
+                    {/* DB products (after sync) */}
+                    {dbLoaded && dbProducts.length > 0 && (() => {
+                      const filtered = platform === "all"
+                        ? dbProducts
+                        : dbProducts.filter((p) => (platform === "ozon" ? p.platform === "Ozon" : p.platform === "WB"));
+                      return filtered.map((p) => {
+                        const appliedPrice = appliedPrices[p.sku] ?? p.current_price;
+                        const isChanged = appliedPrices[p.sku] !== undefined;
+                        const newRevenue = appliedPrice * p.sales;
+                        const origRevenue = p.current_price * p.sales;
+                        return (
+                          <tr key={p.sku} className="border-b border-border last:border-0 hover:bg-secondary/40 transition-colors">
+                            <td className="px-4 py-3 text-foreground">{p.name}</td>
+                            {platform === "all" && (
+                              <td className="px-4 py-3">
+                                <span className={`text-xs px-2 py-0.5 rounded font-medium ${p.platform === "Ozon" ? "text-blue-400 bg-blue-400/10" : "text-pink-400 bg-pink-400/10"}`}>{p.platform}</span>
+                              </td>
+                            )}
+                            <td className="px-4 py-3 font-mono-num text-xs text-muted-foreground">{p.sku}</td>
+                            <td className="px-4 py-3 text-right">
+                              <div className="flex items-center justify-end gap-1.5">
+                                {isChanged && <span className="text-[10px] px-1.5 py-0.5 rounded font-medium text-emerald-400 bg-emerald-400/10 border border-emerald-400/20">обновлена</span>}
+                                <span className={`text-sm font-mono-num font-medium ${isChanged ? "text-emerald-400" : "text-foreground"}`}>
+                                  {appliedPrice.toLocaleString("ru-RU")} ₽
+                                </span>
+                              </div>
+                            </td>
+                            <td className="px-4 py-3 font-mono-num text-right text-foreground">{p.sales}</td>
+                            <td className="px-4 py-3 font-mono-num text-right">
+                              <div className="flex flex-col items-end">
+                                {isChanged && <span className="text-[10px] text-muted-foreground line-through">{origRevenue.toLocaleString("ru-RU")} ₽</span>}
+                                <span className={isChanged ? "text-emerald-400" : "text-foreground"}>
+                                  {newRevenue.toLocaleString("ru-RU")} ₽
+                                </span>
+                              </div>
+                            </td>
+                            <td className="px-4 py-3 font-mono-num text-right">
+                              <span className={p.stock === 0 ? "text-red-400" : p.stock < 20 ? "text-yellow-400" : "text-green-400"}>
+                                {p.stock === 0 ? "Нет" : p.stock}
+                              </span>
+                            </td>
+                            <td className="px-4 py-3 text-right">
+                              <button
+                                onClick={() => openCalcDialog(p.name)}
+                                className="flex items-center gap-1 text-xs px-2.5 py-1 rounded border border-border hover:border-primary/50 text-muted-foreground hover:text-foreground transition-all ml-auto"
+                              >
+                                <Icon name="BarChart2" size={11} />
+                                Детали
+                              </button>
+                            </td>
+                          </tr>
+                        );
+                      });
+                    })()}
+                    {/* Static fallback (before first sync) */}
+                    {dbLoaded && dbProducts.length === 0 && d.products.map((p) => {
                       const calcP = CALC_PRODUCTS.find((cp) => cp.sku === p.sku);
                       const basePrice = calcP?.currentPrice ?? 0;
                       const appliedPrice = calcP ? (appliedPrices[calcP.sku] ?? basePrice) : basePrice;
@@ -1027,9 +1217,7 @@ export default function Index() {
                           <td className="px-4 py-3 font-mono-num text-xs text-muted-foreground">{p.sku}</td>
                           <td className="px-4 py-3 text-right">
                             <div className="flex items-center justify-end gap-1.5">
-                              {isChanged && (
-                                <span className="text-[10px] px-1.5 py-0.5 rounded font-medium text-emerald-400 bg-emerald-400/10 border border-emerald-400/20">обновлена</span>
-                              )}
+                              {isChanged && <span className="text-[10px] px-1.5 py-0.5 rounded font-medium text-emerald-400 bg-emerald-400/10 border border-emerald-400/20">обновлена</span>}
                               <span className={`text-sm font-mono-num font-medium ${isChanged ? "text-emerald-400" : "text-foreground"}`}>
                                 {appliedPrice.toLocaleString("ru-RU")} ₽
                               </span>
@@ -1065,6 +1253,14 @@ export default function Index() {
                         </tr>
                       );
                     })}
+                    {/* Empty state after sync */}
+                    {dbLoaded && dbProducts.length === 0 && d.products.length === 0 && (
+                      <tr>
+                        <td colSpan={8} className="px-4 py-8 text-center text-sm text-muted-foreground">
+                          Нажмите «Синхронизировать» чтобы загрузить товары
+                        </td>
+                      </tr>
+                    )}
                   </tbody>
                 </table>
               </div>

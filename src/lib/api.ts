@@ -107,6 +107,15 @@ export async function apiPushPriceToOzon(sku: string, price: number) {
   return parseResponse(res);
 }
 
+export async function apiPushPriceToWb(sku: string, price: number) {
+  const res = await fetch(`${PRICES_URL}?action=push-wb`, {
+    method: "POST",
+    headers: authHeaders(),
+    body: JSON.stringify({ sku, price }),
+  });
+  return parseResponse(res);
+}
+
 // ── Integrations ─────────────────────────────────────────────────
 
 const INTEGRATIONS_URL = "https://functions.poehali.dev/ed29450a-3acc-4dca-a6a6-646a29edb2ed";

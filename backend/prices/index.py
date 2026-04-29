@@ -2,9 +2,124 @@ import json
 import os
 from utils import get_conn, require_auth, get_token, cors_headers, SCHEMA
 from ozon_client import ozon_post, OzonAPIError, log_error
+from wb_client import wb_post, WBAPIError
 
 
 # ── Helpers ────────────────────────────────────────────────────────
+
+def get_wb_token(cur, user_id: str):
+    cur.execute(
+        f"SELECT api_key FROM {SCHEMA}.integrations WHERE user_id = %s AND platform = 'wb'",
+        (user_id,),
+    )
+    row = cur.fetchone()
+    return row[0] if row else None
+
+
+def apply_wb_price(user_id: str, sku: str, new_price: float, conn) -> dict:
+    """
+    Отправляет цену в WB API и сохраняет в БД.
+
+    POST https://discounts-prices-api.wildberries.ru/api/v2/upload/task
+    Body: { "data": [{ "nmID": <int>, "price": <int> }] }
+
+    Шаги:
+      1. Берёт api_token из integrations
+      2. Находит товар в products (user_id, platform='WB', sku)
+      3. Запоминает old_price
+      4. POST в WB с retry 1 раз на 429/5xx
+      5. Upsert applied_prices + UPDATE products.current_price + INSERT price_history
+
+    Бросает WBAPIError при ошибке (с user_message для UI).
+    Возвращает { ok, sku, price, old_price, history_recorded }.
+    """
+    cur = conn.cursor()
+    try:
+        # 1. Токен
+        api_token = get_wb_token(cur, user_id)
+        if not api_token:
+            raise WBAPIError("WB integration not configured", 0,
+                             "Интеграция Wildberries не настроена. Добавьте токен в Настройки → WB.")
+
+        # 2. Проверка товара
+        cur.execute(
+            f"""SELECT current_price FROM {SCHEMA}.products
+                WHERE user_id = %s AND sku = %s AND platform = 'WB'""",
+            (user_id, sku),
+        )
+        prod_row = cur.fetchone()
+        if not prod_row:
+            raise WBAPIError("WB product not found", 0,
+                             f"Товар {sku} не найден среди ваших товаров Wildberries")
+
+        # 3. Запоминаем old_price (приоритет applied_prices > products.current_price)
+        cur.execute(
+            f"""SELECT COALESCE(
+                    (SELECT price FROM {SCHEMA}.applied_prices WHERE user_id = %s AND sku = %s),
+                    %s)""",
+            (user_id, sku, prod_row[0]),
+        )
+        old_price = float((cur.fetchone() or [0])[0])
+
+        # 4. nmID должен быть числом
+        try:
+            nm_id = int(sku)
+        except ValueError:
+            raise WBAPIError("Invalid nmID", 0,
+                             f"SKU {sku} не является числом — для WB nmID должен быть числовым")
+
+        url = "https://discounts-prices-api.wildberries.ru/api/v2/upload/task"
+        payload = {
+            "data": [
+                {"nmID": nm_id, "price": int(new_price)}
+            ]
+        }
+
+        # Запрос с retry 1 раз на 429/5xx
+        wb_post(
+            url, payload, api_token,
+            conn=conn, user_id=user_id,
+            retries=1,
+            retry_on=(429, 500, 502, 503, 504),
+        )
+
+        # 5. Сохраняем applied_prices
+        cur.execute(
+            f"""INSERT INTO {SCHEMA}.applied_prices (user_id, sku, price)
+                VALUES (%s, %s, %s)
+                ON CONFLICT (user_id, sku) DO UPDATE
+                SET price = EXCLUDED.price, applied_at = NOW()""",
+            (user_id, sku, new_price),
+        )
+        # Обновляем products.current_price
+        cur.execute(
+            f"""UPDATE {SCHEMA}.products
+                SET current_price = %s, updated_at = NOW()
+                WHERE user_id = %s AND sku = %s AND platform = 'WB'""",
+            (new_price, user_id, sku),
+        )
+        # История
+        history_recorded = abs(new_price - old_price) > 0.001
+        if history_recorded:
+            cur.execute(
+                f"""INSERT INTO {SCHEMA}.price_history
+                    (user_id, sku, old_price, new_price, source)
+                    VALUES (%s, %s, %s, %s, 'wb_push')""",
+                (user_id, sku, old_price, new_price),
+            )
+
+        conn.commit()
+        return {
+            "ok":              True,
+            "sku":             sku,
+            "price":           new_price,
+            "old_price":       old_price,
+            "wb_updated":      True,
+            "history_recorded": history_recorded,
+        }
+    finally:
+        cur.close()
+
 
 def get_ozon_creds(cur, user_id: str):
     cur.execute(
@@ -115,6 +230,28 @@ def handler(event: dict, context) -> dict:
                 r[0]: {"price": float(r[1]), "applied_at": str(r[2])}
                 for r in cur.fetchall()
             }})
+
+        # ── POST ?action=push-wb ──────────────────────────────────────
+        elif method == "POST" and qs.get("action") == "push-wb":
+            body = json.loads(event.get("body") or "{}")
+            sku       = (body.get("sku") or "").strip()
+            new_price = body.get("price")
+
+            if not sku or new_price is None:
+                return err("Нужны sku и price")
+            try:
+                new_price = float(new_price)
+            except (TypeError, ValueError):
+                return err("price должен быть числом")
+            if new_price <= 0:
+                return err("Цена должна быть больше 0")
+
+            try:
+                result = apply_wb_price(user_id, sku, new_price, conn)
+            except WBAPIError as e:
+                return err(e.user_message, 502 if e.status_code else 400)
+
+            return ok(result)
 
         # ── POST ?action=push-ozon ────────────────────────────────────
         elif method == "POST" and qs.get("action") == "push-ozon":

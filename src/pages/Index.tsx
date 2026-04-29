@@ -595,6 +595,13 @@ export default function Index() {
     if (data?.error) {
       setSyncError(data.error);
     } else {
+      // Сразу блокируем кнопку и показываем время
+      const now = new Date().toISOString();
+      setLastSyncTime(now);
+      setSyncCooldown(true);
+      // Снимаем cooldown ровно через час
+      setTimeout(() => setSyncCooldown(false), 60 * 60 * 1000);
+      // Перезагружаем таблицу из БД
       await loadData();
     }
     setSyncing(false);

@@ -4,26 +4,34 @@
       "name": "Register new user",
       "method": "POST",
       "path": "/?action=register",
-      "body": {"email": "testuser999@example.com", "password": "password123", "name": "Test User"},
+      "body": {"email": "bcrypt_test@example.com", "password": "securepass123", "name": "BCrypt Test"},
       "expectedStatus": 200,
       "expectedBody": {"token": "string"},
       "bodyMatcher": "partial"
     },
     {
-      "name": "Login existing user",
+      "name": "Login with wrong password",
       "method": "POST",
       "path": "/?action=login",
-      "body": {"email": "testuser999@example.com", "password": "password123"},
-      "expectedStatus": 200,
-      "expectedBody": {"token": "string"},
+      "body": {"email": "bcrypt_test@example.com", "password": "wrongpassword"},
+      "expectedStatus": 401,
+      "expectedBody": {"error": "string"},
       "bodyMatcher": "partial"
     },
     {
-      "name": "Me without token",
+      "name": "Me without token returns 401",
       "method": "GET",
       "path": "/?action=me",
       "expectedStatus": 401,
       "expectedBody": {"error": "string"},
+      "bodyMatcher": "partial"
+    },
+    {
+      "name": "Logout without token returns ok",
+      "method": "POST",
+      "path": "/?action=logout",
+      "expectedStatus": 200,
+      "expectedBody": {"ok": true},
       "bodyMatcher": "partial"
     }
   ]

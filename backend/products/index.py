@@ -1,11 +1,8 @@
 import json
 import os
 import psycopg2
-from datetime import datetime, timezone
+from utils import get_conn, require_auth, get_token, cors_headers, SCHEMA
 
-SCHEMA = "t_p37499172_marketplace_bot"
-
-# Заглушка внешнего API — замените на реальные вызовы Ozon/WB
 MOCK_OZON_PRODUCTS = [
     {"sku": "OZ-44821", "name": "Наушники TWS Pro X12", "platform": "Ozon", "current_price": 3990, "cost_price": 1800,
      "commission_pct": 8, "logistics_cost": 220, "storage_cost_per_unit": 18, "ads_cost_per_unit": 140,
@@ -28,133 +25,109 @@ MOCK_WB_PRODUCTS = [
 ]
 
 
-def get_conn():
-    return psycopg2.connect(os.environ["DATABASE_URL"])
-
-
-def fetch_products_from_api(platform: str, api_key: str | None) -> list:
+def fetch_products_from_api(platform: str, api_key) -> list:
     """
-    Здесь должен быть реальный вызов Ozon/WB API.
-    Если api_key не задан — возвращаем демо-данные.
+    Заглушка внешнего API. При наличии ключа — подключить реальный вызов.
 
-    Ozon: https://api-seller.ozon.ru/v2/product/list
-    WB:   https://statistics-api.wildberries.ru/api/v1/supplier/stocks
+    Ozon: POST https://api-seller.ozon.ru/v2/product/list
+          Headers: Client-Id, Api-Key
+    WB:   GET  https://statistics-api.wildberries.ru/api/v1/supplier/stocks
+          Headers: Authorization: <token>
     """
-    # TODO: раскомментировать и реализовать при наличии реального ключа
-    # if api_key:
-    #     if platform == "Ozon":
-    #         resp = requests.post("https://api-seller.ozon.ru/v2/product/list",
-    #                              headers={"Client-Id": "YOUR_CLIENT_ID", "Api-Key": api_key},
-    #                              json={"filter": {}, "last_id": "", "limit": 100})
-    #         return transform_ozon(resp.json())
-    #     elif platform == "WB":
-    #         resp = requests.get("https://statistics-api.wildberries.ru/api/v1/supplier/stocks",
-    #                             headers={"Authorization": api_key})
-    #         return transform_wb(resp.json())
-
     return MOCK_OZON_PRODUCTS if platform == "Ozon" else MOCK_WB_PRODUCTS
 
 
-def get_user_from_token(cur, token: str):
-    cur.execute(
-        f"""SELECT u.id, u.ozon_api_key, u.wb_api_key
-            FROM {SCHEMA}.sessions s
-            JOIN {SCHEMA}.users u ON u.id = s.user_id
-            WHERE s.token = %s AND s.expires_at > NOW()""",
-        (token,),
-    )
-    return cur.fetchone()
-
-
 def handler(event: dict, context) -> dict:
-    """Управление товарами: получение списка и синхронизация с площадками."""
-    cors = {
-        "Access-Control-Allow-Origin": "*",
-        "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-        "Access-Control-Allow-Headers": "Content-Type, X-Auth-Token",
-    }
+    """Товары пользователя: получение списка и синхронизация с площадками."""
     if event.get("httpMethod") == "OPTIONS":
-        return {"statusCode": 200, "headers": cors, "body": ""}
+        return {"statusCode": 200, "headers": cors_headers(), "body": ""}
 
-    path = event.get("path", "/")
     method = event.get("httpMethod", "GET")
-    token = (event.get("headers") or {}).get("X-Auth-Token") or (event.get("headers") or {}).get("x-auth-token")
+    action = (event.get("queryStringParameters") or {}).get("action", "")
+    token = get_token(event)
 
     def ok(data):
-        return {"statusCode": 200, "headers": cors, "body": json.dumps(data, ensure_ascii=False, default=str)}
+        return {"statusCode": 200, "headers": cors_headers(),
+                "body": json.dumps(data, ensure_ascii=False, default=str)}
 
     def err(msg, code=400):
-        return {"statusCode": code, "headers": cors, "body": json.dumps({"error": msg}, ensure_ascii=False)}
+        return {"statusCode": code, "headers": cors_headers(),
+                "body": json.dumps({"error": msg}, ensure_ascii=False)}
 
-    if not token:
-        return err("Не авторизован", 401)
-
-    conn = get_conn()
+    conn = get_conn(os.environ["DATABASE_URL"])
     cur = conn.cursor()
     try:
-        row = get_user_from_token(cur, token)
-        if not row:
-            return err("Сессия недействительна", 401)
-        user_id, ozon_key, wb_key = row
+        user_id = require_auth(cur, token)
+        if not user_id:
+            return err("Не авторизован", 401)
 
-        # ── GET / — список товаров пользователя ─────────────────────
+        # Достаём ключи площадок
+        cur.execute(
+            f"SELECT ozon_api_key, wb_api_key FROM {SCHEMA}.users WHERE id = %s", (user_id,)
+        )
+        keys_row = cur.fetchone()
+        ozon_key = keys_row[0] if keys_row else None
+        wb_key = keys_row[1] if keys_row else None
+
+        # ── GET — список товаров ─────────────────────────────────────
         if method == "GET":
             cur.execute(
                 f"""SELECT p.sku, p.name, p.platform, p.current_price, p.cost_price,
                            p.commission_pct, p.logistics_cost, p.storage_cost_per_unit,
                            p.ads_cost_per_unit, p.return_rate_pct, p.sales, p.stock, p.revenue,
                            p.updated_at,
-                           COALESCE(ap.price, p.current_price) as applied_price
+                           COALESCE(ap.price, p.current_price) AS applied_price
                     FROM {SCHEMA}.products p
-                    LEFT JOIN {SCHEMA}.applied_prices ap ON ap.user_id = p.user_id AND ap.sku = p.sku
+                    LEFT JOIN {SCHEMA}.applied_prices ap
+                           ON ap.user_id = p.user_id AND ap.sku = p.sku
                     WHERE p.user_id = %s
                     ORDER BY p.revenue DESC""",
                 (user_id,),
             )
-            rows = cur.fetchall()
-            cols = ["sku","name","platform","current_price","cost_price","commission_pct",
-                    "logistics_cost","storage_cost_per_unit","ads_cost_per_unit","return_rate_pct",
-                    "sales","stock","revenue","updated_at","applied_price"]
-            products = [dict(zip(cols, r)) for r in rows]
-            for p in products:
-                for k in ["current_price","cost_price","commission_pct","logistics_cost",
-                          "storage_cost_per_unit","ads_cost_per_unit","return_rate_pct","revenue","applied_price"]:
+            cols = ["sku", "name", "platform", "current_price", "cost_price", "commission_pct",
+                    "logistics_cost", "storage_cost_per_unit", "ads_cost_per_unit", "return_rate_pct",
+                    "sales", "stock", "revenue", "updated_at", "applied_price"]
+            products = []
+            for r in cur.fetchall():
+                p = dict(zip(cols, r))
+                for k in ["current_price", "cost_price", "commission_pct", "logistics_cost",
+                          "storage_cost_per_unit", "ads_cost_per_unit", "return_rate_pct",
+                          "revenue", "applied_price"]:
                     p[k] = float(p[k])
+                products.append(p)
 
-            # Последняя синхронизация
             cur.execute(
                 f"""SELECT platform, status, products_count, started_at, finished_at
                     FROM {SCHEMA}.sync_log WHERE user_id = %s
                     ORDER BY started_at DESC LIMIT 4""",
                 (user_id,),
             )
-            sync_rows = cur.fetchall()
-            last_sync = [{"platform": r[0], "status": r[1], "count": r[2],
-                          "started_at": str(r[3]), "finished_at": str(r[4])} for r in sync_rows]
-
+            last_sync = [
+                {"platform": r[0], "status": r[1], "count": r[2],
+                 "started_at": str(r[3]), "finished_at": str(r[4])}
+                for r in cur.fetchall()
+            ]
             return ok({"products": products, "last_sync": last_sync})
 
-        # ── POST /sync — синхронизация с площадкой ──────────────────
-        elif method == "POST" and path.endswith("/sync"):
+        # ── POST ?action=sync ────────────────────────────────────────
+        elif method == "POST" and action == "sync":
             body = json.loads(event.get("body") or "{}")
-            platform = body.get("platform", "all")  # "Ozon", "WB", "all"
-
+            platform = body.get("platform", "all")
             platforms = ["Ozon", "WB"] if platform == "all" else [platform]
 
-            # Проверка: не чаще 1 раза в час
+            # Защита: не чаще 1 раза в час
             for pl in platforms:
                 cur.execute(
                     f"""SELECT started_at FROM {SCHEMA}.sync_log
                         WHERE user_id = %s AND platform = %s AND status = 'success'
                         AND started_at > NOW() - INTERVAL '1 hour'
-                        ORDER BY started_at DESC LIMIT 1""",
+                        LIMIT 1""",
                     (user_id, pl),
                 )
-                recent = cur.fetchone()
-                if recent:
-                    return err(f"{pl}: синхронизация уже выполнялась менее часа назад. Следующая в {str(recent[0])}", 429)
+                if cur.fetchone():
+                    return err(f"Синхронизация {pl} доступна раз в час", 429)
 
-            total_synced = 0
+            total = 0
             for pl in platforms:
                 api_key = ozon_key if pl == "Ozon" else wb_key
                 cur.execute(
@@ -164,14 +137,13 @@ def handler(event: dict, context) -> dict:
                 log_id = cur.fetchone()[0]
                 conn.commit()
 
-                products = fetch_products_from_api(pl, api_key)
-
-                for p in products:
+                items = fetch_products_from_api(pl, api_key)
+                for p in items:
                     cur.execute(
                         f"""INSERT INTO {SCHEMA}.products
-                            (user_id, sku, name, platform, current_price, cost_price, commission_pct,
-                             logistics_cost, storage_cost_per_unit, ads_cost_per_unit, return_rate_pct,
-                             sales, stock, revenue, updated_at)
+                            (user_id, sku, name, platform, current_price, cost_price,
+                             commission_pct, logistics_cost, storage_cost_per_unit,
+                             ads_cost_per_unit, return_rate_pct, sales, stock, revenue, updated_at)
                             VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,NOW())
                             ON CONFLICT (user_id, sku) DO UPDATE SET
                               name=EXCLUDED.name, platform=EXCLUDED.platform,
@@ -189,17 +161,14 @@ def handler(event: dict, context) -> dict:
                          p["logistics_cost"], p["storage_cost_per_unit"], p["ads_cost_per_unit"],
                          p["return_rate_pct"], p["sales"], p["stock"], p["revenue"]),
                     )
-
                 cur.execute(
-                    f"""UPDATE {SCHEMA}.sync_log
-                        SET status='success', products_count=%s, finished_at=NOW()
-                        WHERE id=%s""",
-                    (len(products), log_id),
+                    f"UPDATE {SCHEMA}.sync_log SET status='success', products_count=%s, finished_at=NOW() WHERE id=%s",
+                    (len(items), log_id),
                 )
                 conn.commit()
-                total_synced += len(products)
+                total += len(items)
 
-            return ok({"ok": True, "synced": total_synced})
+            return ok({"ok": True, "synced": total})
 
         else:
             return err("Не найдено", 404)

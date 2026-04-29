@@ -13,10 +13,10 @@ CORS = {
 }
 
 
-# ── Ozon API helpers ──────────────────────────────────────────────────────────
+# ── Ozon API helpers ───────────────────────────────────────────────
 
 def ozon_post(path: str, payload: dict, client_id: str, api_key: str) -> dict:
-    """POST-запрос к Ozon Seller API. Бросает исключение при HTTP-ошибке."""
+    """POST-запрос к Ozon Seller API. Бросает RuntimeError при HTTP-ошибке."""
     url = f"https://api-seller.ozon.ru{path}"
     data = json.dumps(payload).encode()
     req = urllib.request.Request(
@@ -37,59 +37,83 @@ def ozon_post(path: str, payload: dict, client_id: str, api_key: str) -> dict:
 
 def fetch_product_list(client_id: str, api_key: str) -> list[dict]:
     """
-    POST /v2/product/list
-    Возвращает все товары с пагинацией (cursor-based, last_id).
-    Поля ответа: product_id, offer_id, name, has_fbo_stocks, ...
+    POST /v2/product/list  — все товары с пагинацией (last_id cursor).
+    Поля: product_id, offer_id, ...
     """
     all_items: list[dict] = []
     last_id = ""
-
     while True:
         resp = ozon_post(
             "/v2/product/list",
-            {
-                "filter": {"visibility": "ALL"},
-                "last_id": last_id,
-                "limit": 100,
-            },
+            {"filter": {"visibility": "ALL"}, "last_id": last_id, "limit": 100},
             client_id, api_key,
         )
         result = resp.get("result", {})
         items = result.get("items", [])
         all_items.extend(items)
-
-        # Пагинация: если вернулось < 100 — дошли до конца
         last_id = result.get("last_id", "")
         if len(items) < 100 or not last_id:
             break
-
     return all_items
 
 
 def fetch_product_info(product_ids: list[int], client_id: str, api_key: str) -> dict[int, dict]:
     """
-    POST /v2/product/info/list
-    Возвращает dict {product_id: info} с ценами, названиями, комиссиями.
-    Ozon принимает до 1000 id за запрос.
+    POST /v2/product/info/list — названия, комиссии.
+    Возвращает dict {product_id: info}.
     """
     info_map: dict[int, dict] = {}
-    # Батчи по 100 чтобы не превысить лимиты
     for i in range(0, len(product_ids), 100):
         batch = product_ids[i:i + 100]
-        resp = ozon_post(
-            "/v2/product/info/list",
-            {"product_id": batch},
-            client_id, api_key,
-        )
+        resp = ozon_post("/v2/product/info/list", {"product_id": batch}, client_id, api_key)
         for item in resp.get("result", {}).get("items", []):
             info_map[item["id"]] = item
     return info_map
 
 
+def fetch_prices(offer_ids: list[str], client_id: str, api_key: str) -> dict[str, dict]:
+    """
+    POST /v4/product/info/prices — цены по offer_id (SKU продавца).
+
+    Ответ (один элемент):
+    {
+      "offer_id": "...",
+      "price": {
+        "price":            "3990.00",   — базовая цена
+        "old_price":        "4490.00",   — цена до скидки (или "0")
+        "marketing_price":  "3490.00",   — цена с акцией (или "0")
+        "min_price":        "2900.00",
+        "buybox_price":     "3490.00",
+        "auto_action_enabled": "DISABLED"
+      },
+      "commissions": { "fbs_direct_flow_trans_max_amount": "...", ... }
+    }
+
+    Возвращает dict {offer_id: price_block}.
+    """
+    price_map: dict[str, dict] = {}
+    for i in range(0, len(offer_ids), 100):
+        batch = offer_ids[i:i + 100]
+        resp = ozon_post(
+            "/v4/product/info/prices",
+            {
+                "filter": {"offer_id": batch, "visibility": "ALL"},
+                "last_id": "",
+                "limit":   100,
+            },
+            client_id, api_key,
+        )
+        for item in resp.get("result", {}).get("items", []):
+            oid = item.get("offer_id")
+            if oid:
+                price_map[oid] = item.get("price", {})
+    return price_map
+
+
 def fetch_stocks(product_ids: list[int], client_id: str, api_key: str) -> dict[int, int]:
     """
-    POST /v3/product/info/stocks
-    Возвращает dict {product_id: total_stock}.
+    POST /v3/product/info/stocks — остатки по складам.
+    Возвращает dict {product_id: total_present}.
     """
     stock_map: dict[int, int] = {}
     for i in range(0, len(product_ids), 100):
@@ -97,92 +121,116 @@ def fetch_stocks(product_ids: list[int], client_id: str, api_key: str) -> dict[i
         resp = ozon_post(
             "/v3/product/info/stocks",
             {
-                "filter": {
-                    "product_id":  [str(pid) for pid in batch],
-                    "visibility":  "ALL",
-                },
+                "filter": {"product_id": [str(pid) for pid in batch], "visibility": "ALL"},
                 "last_id": "",
-                "limit":   100,
+                "limit": 100,
             },
             client_id, api_key,
         )
         for s in resp.get("result", {}).get("items", []):
             pid = s.get("product_id")
-            # present — фактический остаток, reserved — зарезервировано
             total = sum(w.get("present", 0) for w in s.get("stocks", []))
             if pid is not None:
                 stock_map[int(pid)] = total
     return stock_map
 
 
-def sync_ozon_products(user_id: str, client_id: str, api_key: str, conn) -> list[dict]:
+def _parse_price(val) -> float:
+    """Безопасно парсит строку или число в float. '0' → 0.0."""
+    try:
+        return float(val or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+# ── Core sync logic ────────────────────────────────────────────────
+
+def sync_ozon_products(user_id: str, client_id: str, api_key: str, conn) -> dict:
     """
-    Основная функция синхронизации.
-    1. Получает список товаров из Ozon /v2/product/list
-    2. Обогащает деталями (/v2/product/info/list) и остатками (/v3/product/info/stocks)
-    3. Сохраняет/обновляет в таблице products (upsert по user_id + sku)
-    4. Возвращает итоговый список товаров
+    Полная синхронизация товаров Ozon:
+    1. /v2/product/list        — список товаров (product_id + offer_id)
+    2. /v2/product/info/list   — название, комиссия
+    3. /v4/product/info/prices — актуальные цены (price, old_price, marketing_price)
+    4. /v3/product/info/stocks — остатки
+    5. Upsert в products:
+       - current_price = из Ozon (ВСЕГДА обновляем — это реальная цена на площадке)
+       - old_price     = старая цена до скидки (если есть)
+       - applied_prices НЕ трогаем (пользовательская цена)
+    6. Возвращает статистику и список товаров
     """
     cur = conn.cursor()
     try:
-        # ── Шаг 1: список товаров ────────────────────────────────────
+        # ── 1. Список товаров ─────────────────────────────────────────
         raw_items = fetch_product_list(client_id, api_key)
         if not raw_items:
-            return []
+            return {"synced": 0, "prices_updated": 0, "products": []}
 
         product_ids = [item["product_id"] for item in raw_items]
-        # offer_id — это артикул продавца (SKU), product_id — внутренний id Ozon
-        offer_map = {item["product_id"]: item.get("offer_id", str(item["product_id"])) for item in raw_items}
+        offer_map = {
+            item["product_id"]: item.get("offer_id", str(item["product_id"]))
+            for item in raw_items
+        }
+        all_offer_ids = list(offer_map.values())
 
-        # ── Шаг 2: детали товаров (цена, название) ───────────────────
+        # ── 2. Детали (название, комиссия FBO) ───────────────────────
         info_map = fetch_product_info(product_ids, client_id, api_key)
 
-        # ── Шаг 3: остатки ───────────────────────────────────────────
+        # ── 3. Цены через /v4/product/info/prices ────────────────────
+        price_map = fetch_prices(all_offer_ids, client_id, api_key)
+
+        # ── 4. Остатки ───────────────────────────────────────────────
         stock_map = fetch_stocks(product_ids, client_id, api_key)
 
-        # ── Шаг 4: сборка + upsert ───────────────────────────────────
-        result: list[dict] = []
+        # ── 5. Upsert ─────────────────────────────────────────────────
+        result:         list[dict] = []
+        prices_updated: int = 0
 
         for pid in product_ids:
-            info = info_map.get(pid, {})
-            sku  = offer_map.get(pid, str(pid))
-            name = info.get("name", f"Товар {pid}")
-
-            # Цена: marketing_price > min_price > price (приоритет)
-            price_info = info.get("price") or {}
-            price = float(
-                price_info.get("marketing_price") or
-                price_info.get("min_price") or
-                price_info.get("price") or 0
-            )
-
-            # Комиссия FBO (абсолютная) → переводим в %
-            raw_comm = float((info.get("commissions") or {}).get("fbo_fulfillment_amount") or 0)
-            commission_pct = round(raw_comm / price * 100, 2) if price > 0 and raw_comm > 0 else 8.0
-
+            sku   = offer_map.get(pid, str(pid))
+            info  = info_map.get(pid, {})
+            name  = info.get("name", f"Товар {pid}")
             stock = stock_map.get(pid, 0)
 
-            # Дефолтные поля — обновить когда подключите реальную аналитику
-            cost_price            = round(price * 0.45, 2)   # ~45% от цены
-            logistics_cost        = 180.0                     # FBO логистика ~средняя
+            # Цены из /v4
+            p_block = price_map.get(sku, {})
+            # Приоритет: marketing_price (акция) > price (базовая)
+            marketing = _parse_price(p_block.get("marketing_price"))
+            base      = _parse_price(p_block.get("price"))
+            current_price = marketing if marketing > 0 else base
+
+            # old_price — цена «до скидки» (0 если не задана)
+            raw_old = _parse_price(p_block.get("old_price"))
+            old_price = raw_old if raw_old > 0 and raw_old != current_price else None
+
+            # Комиссия FBO → %
+            raw_comm       = float((info.get("commissions") or {}).get("fbo_fulfillment_amount") or 0)
+            commission_pct = round(raw_comm / current_price * 100, 2) if current_price > 0 and raw_comm > 0 else 8.0
+
+            # Прочие дефолты
+            cost_price            = round(current_price * 0.45, 2)
+            logistics_cost        = 180.0
             storage_cost_per_unit = 12.0
             ads_cost_per_unit     = 80.0
             return_rate_pct       = 4.0
-            # sales — в отдельном Statistics API, здесь ставим 0 (обновить позже)
-            sales = 0
+            sales                 = 0
+            revenue               = 0.0
 
-            revenue = round(price * sales, 2) if sales else 0.0
-
-            # Upsert в products
+            # Upsert: current_price и old_price ВСЕГДА обновляем из Ozon.
+            # applied_prices — отдельная таблица, её не трогаем.
             cur.execute(
                 f"""INSERT INTO {SCHEMA}.products
-                    (user_id, sku, name, platform, current_price, cost_price,
+                    (user_id, sku, name, platform, current_price, old_price, cost_price,
                      commission_pct, logistics_cost, storage_cost_per_unit,
                      ads_cost_per_unit, return_rate_pct, sales, stock, revenue, updated_at)
-                    VALUES (%s,%s,%s,'Ozon',%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,NOW())
+                    VALUES (%s,%s,%s,'Ozon',%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,NOW())
                     ON CONFLICT (user_id, sku) DO UPDATE SET
                       name                  = EXCLUDED.name,
                       platform              = 'Ozon',
+                      old_price             = CASE
+                                                WHEN products.current_price <> EXCLUDED.current_price
+                                                THEN products.current_price
+                                                ELSE EXCLUDED.old_price
+                                              END,
                       current_price         = EXCLUDED.current_price,
                       cost_price            = EXCLUDED.cost_price,
                       commission_pct        = EXCLUDED.commission_pct,
@@ -192,38 +240,48 @@ def sync_ozon_products(user_id: str, client_id: str, api_key: str, conn) -> list
                       return_rate_pct       = EXCLUDED.return_rate_pct,
                       stock                 = EXCLUDED.stock,
                       revenue               = EXCLUDED.revenue,
-                      updated_at            = NOW()""",
+                      updated_at            = NOW()
+                    RETURNING (xmax <> 0) AS was_update,
+                              (products.current_price IS DISTINCT FROM EXCLUDED.current_price)""",
                 (
                     user_id, sku, name,
-                    price, cost_price, commission_pct,
-                    logistics_cost, storage_cost_per_unit, ads_cost_per_unit,
-                    return_rate_pct, sales, stock, revenue,
+                    current_price, old_price, cost_price,
+                    commission_pct, logistics_cost, storage_cost_per_unit,
+                    ads_cost_per_unit, return_rate_pct, sales, stock, revenue,
                 ),
             )
+            row = cur.fetchone()
+            if row and row[0]:   # was_update = True (не INSERT)
+                prices_updated += 1
 
             result.append({
-                "sku":    sku,
-                "name":   name,
-                "price":  price,
-                "stock":  stock,
-                "sales":  sales,
+                "sku":         sku,
+                "name":        name,
+                "price":       current_price,
+                "old_price":   old_price,
+                "stock":       stock,
+                "sales":       sales,
+                "price_changed": bool(row and row[1]) if row else False,
             })
 
         conn.commit()
-        return result
+        return {
+            "synced":         len(result),
+            "prices_updated": prices_updated,
+            "products":       result,
+        }
 
     finally:
         cur.close()
 
 
-# ── DB helpers ────────────────────────────────────────────────────────────────
+# ── DB helpers ─────────────────────────────────────────────────────
 
 def get_conn() -> psycopg2.extensions.connection:
     return psycopg2.connect(os.environ["DATABASE_URL"])
 
 
 def require_auth(cur, event: dict):
-    """Проверяет X-Auth-Token. Возвращает (user_id, plan) или (None, None)."""
     h = event.get("headers") or {}
     token = h.get("X-Auth-Token") or h.get("x-auth-token") or ""
     if not token:
@@ -240,7 +298,6 @@ def require_auth(cur, event: dict):
 
 
 def get_ozon_creds(cur, user_id: str):
-    """Возвращает (client_id, api_key) или (None, None)."""
     cur.execute(
         f"SELECT client_id, api_key FROM {SCHEMA}.integrations WHERE user_id = %s AND platform = 'ozon'",
         (user_id,),
@@ -259,26 +316,18 @@ def err(msg, code=400):
             "body": json.dumps({"error": msg}, ensure_ascii=False)}
 
 
-# ── Handler ───────────────────────────────────────────────────────────────────
+# ── Handler ────────────────────────────────────────────────────────
 
 def handler(event: dict, context) -> dict:
     """
-    Синхронизация товаров Ozon для текущего пользователя.
-    POST /sync-ozon
-    Header: X-Auth-Token
+    Синхронизация товаров Ozon.
+    POST /sync-ozon   Header: X-Auth-Token
 
-    Алгоритм:
-    1. Аутентификация по токену → user_id
-    2. Берёт client_id + api_key из integrations
-    3. Вызывает Ozon /v2/product/list (с пагинацией)
-    4. Обогащает деталями и остатками
-    5. Сохраняет/обновляет products
-    6. Записывает в sync_log
-    7. Возвращает список товаров
+    Шаги: auth → creds → cooldown → list → info → prices → stocks → upsert → log
+    Возвращает: { ok, synced, prices_updated, products[] }
     """
     if event.get("httpMethod") == "OPTIONS":
         return {"statusCode": 200, "headers": CORS, "body": ""}
-
     if event.get("httpMethod") != "POST":
         return err("Только POST", 405)
 
@@ -289,30 +338,21 @@ def handler(event: dict, context) -> dict:
         if not user_id:
             return err("Не авторизован", 401)
 
-        # Проверка cooldown (не чаще 1 раза в час)
+        # Cooldown 1 час
         cur.execute(
             f"""SELECT started_at FROM {SCHEMA}.sync_log
                 WHERE user_id = %s AND platform = 'ozon' AND status = 'success'
-                AND started_at > NOW() - INTERVAL '1 hour'
-                LIMIT 1""",
+                AND started_at > NOW() - INTERVAL '1 hour' LIMIT 1""",
             (user_id,),
         )
-        recent = cur.fetchone()
-        if recent:
-            return err(
-                f"Синхронизация Ozon уже выполнялась менее часа назад. Следующая доступна после {recent[0]}",
-                429,
-            )
+        if cur.fetchone():
+            return err("Синхронизация Ozon уже выполнялась менее часа назад", 429)
 
-        # Берём credentials из БД
         client_id, api_key = get_ozon_creds(cur, user_id)
         if not client_id or not api_key:
-            return err(
-                "Интеграция Ozon не настроена. Добавьте Client-Id и Api-Key в Настройки → Ozon.",
-                400,
-            )
+            return err("Интеграция Ozon не настроена. Добавьте ключи в Настройки → Ozon.", 400)
 
-        # Лог: старт синхронизации
+        # Лог: старт
         cur.execute(
             f"INSERT INTO {SCHEMA}.sync_log (user_id, platform, status) VALUES (%s, 'ozon', 'running') RETURNING id",
             (user_id,),
@@ -321,9 +361,8 @@ def handler(event: dict, context) -> dict:
         conn.commit()
 
         try:
-            products = sync_ozon_products(user_id, client_id, api_key, conn)
+            stats = sync_ozon_products(user_id, client_id, api_key, conn)
         except RuntimeError as e:
-            # Обновляем лог с ошибкой
             cur.execute(
                 f"UPDATE {SCHEMA}.sync_log SET status='error', error=%s, finished_at=NOW() WHERE id=%s",
                 (str(e), log_id),
@@ -331,20 +370,28 @@ def handler(event: dict, context) -> dict:
             conn.commit()
             return err(f"Ошибка Ozon API: {e}", 502)
 
-        # Лог: успех
+        # Лог: успех с деталями
         cur.execute(
             f"""UPDATE {SCHEMA}.sync_log
-                SET status='success', products_count=%s, finished_at=NOW()
+                SET status='success',
+                    products_count=%s,
+                    finished_at=NOW()
                 WHERE id=%s""",
-            (len(products), log_id),
+            (stats["synced"], log_id),
         )
         conn.commit()
 
         return ok({
-            "ok":       True,
-            "platform": "ozon",
-            "synced":   len(products),
-            "products": products,
+            "ok":             True,
+            "platform":       "ozon",
+            "synced":         stats["synced"],
+            "prices_updated": stats["prices_updated"],
+            "products":       stats["products"],
+            "log": {
+                "total_products":  stats["synced"],
+                "prices_updated":  stats["prices_updated"],
+                "prices_changed":  sum(1 for p in stats["products"] if p.get("price_changed")),
+            },
         })
 
     except Exception as e:

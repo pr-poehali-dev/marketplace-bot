@@ -637,6 +637,7 @@ interface DBProduct {
   name: string;
   platform: string;
   current_price: number;
+  old_price: number | null;
   cost_price: number;
   commission_pct: number;
   logistics_cost: number;
@@ -1478,11 +1479,25 @@ export default function Index() {
                             )}
                             <td className="px-4 py-3 font-mono-num text-xs text-muted-foreground">{p.sku}</td>
                             <td className="px-4 py-3 text-right">
-                              <div className="flex items-center justify-end gap-1.5">
-                                {isChanged && <span className="text-[10px] px-1.5 py-0.5 rounded font-medium text-emerald-400 bg-emerald-400/10 border border-emerald-400/20">обновлена</span>}
-                                <span className={`text-sm font-mono-num font-medium ${isChanged ? "text-emerald-400" : "text-foreground"}`}>
-                                  {appliedPrice.toLocaleString("ru-RU")} ₽
-                                </span>
+                              <div className="flex flex-col items-end gap-0.5">
+                                <div className="flex items-center justify-end gap-1.5">
+                                  {isChanged && <span className="text-[10px] px-1.5 py-0.5 rounded font-medium text-emerald-400 bg-emerald-400/10 border border-emerald-400/20">обновлена</span>}
+                                  <span className={`text-sm font-mono-num font-medium ${isChanged ? "text-emerald-400" : "text-foreground"}`}>
+                                    {appliedPrice.toLocaleString("ru-RU")} ₽
+                                  </span>
+                                </div>
+                                {/* Старая цена Ozon (до скидки) */}
+                                {p.old_price && p.old_price > p.current_price && (
+                                  <span className="text-[10px] font-mono-num text-muted-foreground line-through">
+                                    {p.old_price.toLocaleString("ru-RU")} ₽
+                                  </span>
+                                )}
+                                {/* Изменение цены на площадке */}
+                                {p.old_price && Math.abs(p.old_price - p.current_price) > 0.5 && (
+                                  <span className={`text-[10px] font-mono-num ${p.current_price < p.old_price ? "text-green-400" : "text-red-400"}`}>
+                                    {p.current_price < p.old_price ? "−" : "+"}{Math.abs(p.current_price - p.old_price).toLocaleString("ru-RU")} ₽ на Ozon
+                                  </span>
+                                )}
                               </div>
                             </td>
                             <td className="px-4 py-3 font-mono-num text-right text-foreground">{p.sales}</td>
@@ -1976,7 +1991,12 @@ export default function Index() {
                           setOzonStatus(null);
                           const data = await apiSyncOzon();
                           if (data?.ok) {
-                            setOzonStatus({ ok: true, msg: `Синхронизировано ${data.synced} товаров из Ozon` });
+                            const priceChanges = data.log?.prices_changed ?? 0;
+                            const updated = data.log?.prices_updated ?? data.prices_updated ?? 0;
+                            setOzonStatus({
+                              ok: true,
+                              msg: `Синхронизировано ${data.synced} товаров · обновлено цен: ${updated}${priceChanges > 0 ? ` · изменилось цен: ${priceChanges}` : ""}`,
+                            });
                             await loadData();
                           } else {
                             setOzonStatus({ ok: false, msg: data?.error || "Ошибка синхронизации" });

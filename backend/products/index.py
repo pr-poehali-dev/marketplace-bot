@@ -72,8 +72,8 @@ def handler(event: dict, context) -> dict:
         # ── GET — список товаров ─────────────────────────────────────
         if method == "GET":
             cur.execute(
-                f"""SELECT p.sku, p.name, p.platform, p.current_price, p.cost_price,
-                           p.commission_pct, p.logistics_cost, p.storage_cost_per_unit,
+                f"""SELECT p.sku, p.name, p.platform, p.current_price, p.old_price,
+                           p.cost_price, p.commission_pct, p.logistics_cost, p.storage_cost_per_unit,
                            p.ads_cost_per_unit, p.return_rate_pct, p.sales, p.stock, p.revenue,
                            p.updated_at,
                            COALESCE(ap.price, p.current_price) AS applied_price
@@ -84,9 +84,9 @@ def handler(event: dict, context) -> dict:
                     ORDER BY p.revenue DESC""",
                 (user_id,),
             )
-            cols = ["sku", "name", "platform", "current_price", "cost_price", "commission_pct",
-                    "logistics_cost", "storage_cost_per_unit", "ads_cost_per_unit", "return_rate_pct",
-                    "sales", "stock", "revenue", "updated_at", "applied_price"]
+            cols = ["sku", "name", "platform", "current_price", "old_price", "cost_price",
+                    "commission_pct", "logistics_cost", "storage_cost_per_unit", "ads_cost_per_unit",
+                    "return_rate_pct", "sales", "stock", "revenue", "updated_at", "applied_price"]
             products = []
             for r in cur.fetchall():
                 p = dict(zip(cols, r))
@@ -94,6 +94,8 @@ def handler(event: dict, context) -> dict:
                           "storage_cost_per_unit", "ads_cost_per_unit", "return_rate_pct",
                           "revenue", "applied_price"]:
                     p[k] = float(p[k])
+                if p["old_price"] is not None:
+                    p["old_price"] = float(p["old_price"])
                 products.append(p)
 
             cur.execute(

@@ -148,3 +148,30 @@ export async function apiGetRecommendations() {
   });
   return parseResponse(res);
 }
+
+// ── Pricing Rules ─────────────────────────────────────────────────
+
+const PRICING_RULES_URL = "https://functions.poehali.dev/eb291255-d134-4bb1-b318-d361cfc35747";
+
+export async function apiGetRules() {
+  const res = await fetch(PRICING_RULES_URL, { method: "GET", headers: authHeaders() });
+  return parseResponse(res);
+}
+
+export async function apiCreateRule(type: string, value: number) {
+  const res = await fetch(PRICING_RULES_URL, {
+    method: "POST",
+    headers: authHeaders(),
+    body: JSON.stringify({ type, value }),
+  });
+  return parseResponse(res);
+}
+
+export async function apiUpdateRule(id: string, patch: { enabled?: boolean; value?: number }) {
+  const res = await fetch(`${PRICING_RULES_URL}?id=${id}`, {
+    method: "PATCH",
+    headers: authHeaders(),
+    body: JSON.stringify(patch),
+  });
+  return parseResponse(res);
+}

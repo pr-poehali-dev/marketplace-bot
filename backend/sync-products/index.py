@@ -102,6 +102,85 @@ def err(msg, code=400, extra: dict | None = None):
     return {"statusCode": code, "headers": CORS, "body": json.dumps(body, ensure_ascii=False)}
 
 
+def apply_rules(items: list[dict], rules: list[dict]) -> tuple[list[dict], list[dict]]:
+    """
+    Применяет активные правила ценообразования к товарам.
+    Возвращает (обновлённые_товары, список_применённых_изменений).
+    """
+    enabled = [r for r in rules if r["enabled"]]
+    if not enabled:
+        return items, []
+
+    rule_map = {r["type"]: r["value"] for r in enabled}
+    changes = []
+
+    for item in items:
+        price = float(item["price"])
+        cost  = float(item["cost_price"])
+        comm  = float(item["commission_pct"])
+        logi  = float(item["logistics_cost"])
+
+        # Текущая маржа: (price - cost - commission - logistics) / price
+        def margin(p):
+            profit = p - cost - p * (comm / 100) - logi
+            return (profit / p * 100) if p > 0 else 0.0
+
+        original_price = price
+        applied = []
+
+        # Правило: increase_margin — поднять цену до целевой маржи
+        if "increase_margin" in rule_map:
+            target_margin = rule_map["increase_margin"]
+            if margin(price) < target_margin:
+                # Рассчитываем минимальную цену для target_margin:
+                # price * (1 - comm/100 - target_margin/100) = cost + logi
+                denom = 1 - comm / 100 - target_margin / 100
+                if denom > 0:
+                    new_price = round((cost + logi) / denom / 10) * 10
+                    new_price = max(new_price, price * 1.01)
+                    applied.append(f"маржа {margin(price):.1f}% < {target_margin}% → цена {price:.0f}→{new_price:.0f} ₽")
+                    price = new_price
+
+        # Правило: beat_competitor — снизить цену на value%
+        if "beat_competitor" in rule_map:
+            discount_pct = rule_map["beat_competitor"]
+            new_price = round(price * (1 - discount_pct / 100) / 10) * 10
+            applied.append(f"beat_competitor: -{discount_pct}% → {price:.0f}→{new_price:.0f} ₽")
+            price = new_price
+
+        # Правило: min_margin — не опускаться ниже минимальной маржи
+        if "min_margin" in rule_map:
+            min_m = rule_map["min_margin"]
+            if margin(price) < min_m:
+                denom = 1 - comm / 100 - min_m / 100
+                if denom > 0:
+                    floor_price = round((cost + logi) / denom / 10) * 10
+                    if price < floor_price:
+                        applied.append(f"min_margin: пол {floor_price:.0f} ₽ → скорректировано")
+                        price = floor_price
+
+        # Правило: max_discount — не снижать более чем на value%
+        if "max_discount" in rule_map:
+            max_disc = rule_map["max_discount"]
+            floor_price = original_price * (1 - max_disc / 100)
+            if price < floor_price:
+                applied.append(f"max_discount: не более {max_disc}% → {price:.0f}→{floor_price:.0f} ₽")
+                price = floor_price
+
+        if abs(price - original_price) > 0.5:
+            item["price"] = round(price / 10) * 10
+            item["revenue"] = round(item["price"] * item["sales"], 2)
+            changes.append({
+                "sku": item["sku"],
+                "name": item["name"],
+                "old_price": original_price,
+                "new_price": item["price"],
+                "rules_applied": applied,
+            })
+
+    return items, changes
+
+
 def save_products(cur, user_id: str, platform: str, items: list[dict]):
     for p in items:
         cur.execute(
@@ -161,6 +240,13 @@ def handler(event: dict, context) -> dict:
         )
         integrations = {row[0]: row[1] for row in cur.fetchall()}
 
+        # Загружаем активные правила ценообразования
+        cur.execute(
+            f"SELECT type, value, enabled FROM {SCHEMA}.pricing_rules WHERE user_id = %s",
+            (user_id,),
+        )
+        pricing_rules = [{"type": r[0], "value": float(r[1]), "enabled": r[2]} for r in cur.fetchall()]
+
         results = []
         for platform in platforms:
             # Cooldown 1 час
@@ -177,13 +263,16 @@ def handler(event: dict, context) -> dict:
             api_key = integrations.get(platform)
             items = mock_marketplace_api(platform, api_key or "")
 
+            # Применяем правила ценообразования
+            items, rule_changes = apply_rules(items, pricing_rules)
+
             # Считаем НОВЫЕ SKU (которых ещё нет у пользователя)
             existing_skus = set()
             if items:
-                skus = tuple(p["sku"] for p in items)
+                skus = [p["sku"] for p in items]
                 cur.execute(
                     f"SELECT sku FROM {SCHEMA}.products WHERE user_id = %s AND sku = ANY(%s::text[])",
-                    (user_id, list(skus)),
+                    (user_id, skus),
                 )
                 existing_skus = {r[0] for r in cur.fetchall()}
 
@@ -210,7 +299,22 @@ def handler(event: dict, context) -> dict:
             conn.commit()
 
             save_products(cur, user_id, platform, items)
-            current_count += len(new_items)  # обновляем счётчик для следующей платформы
+            current_count += len(new_items)
+
+            # Записываем в price_history изменения от правил
+            for ch in rule_changes:
+                cur.execute(
+                    f"""INSERT INTO {SCHEMA}.price_history (user_id, sku, old_price, new_price, source)
+                        VALUES (%s, %s, %s, %s, 'rule')""",
+                    (user_id, ch["sku"], ch["old_price"], ch["new_price"]),
+                )
+                # Также обновляем applied_prices
+                cur.execute(
+                    f"""INSERT INTO {SCHEMA}.applied_prices (user_id, sku, price)
+                        VALUES (%s, %s, %s)
+                        ON CONFLICT (user_id, sku) DO UPDATE SET price = EXCLUDED.price, applied_at = NOW()""",
+                    (user_id, ch["sku"], ch["new_price"]),
+                )
 
             cur.execute(
                 f"UPDATE {SCHEMA}.sync_log SET status='success', products_count=%s, finished_at=NOW() WHERE id=%s",
@@ -222,6 +326,8 @@ def handler(event: dict, context) -> dict:
                 "platform": platform,
                 "synced": len(items),
                 "new": len(new_items),
+                "rules_applied": len(rule_changes),
+                "price_changes": rule_changes,
                 "products": [{"sku": p["sku"], "name": p["name"], "price": p["price"],
                                "sales": p["sales"], "stock": p["stock"]} for p in items],
                 "demo_mode": api_key is None,

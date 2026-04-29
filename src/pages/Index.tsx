@@ -1,7 +1,7 @@
 import { useState, useMemo, useEffect, useCallback } from "react";
 import Icon from "@/components/ui/icon";
 import { useAuth } from "@/hooks/useAuth";
-import { apiGetProducts, apiGetPrices, apiSavePrice, apiSyncProducts, apiGetRecommendations, apiGetPriceHistory } from "@/lib/api";
+import { apiGetProducts, apiGetPrices, apiSavePrice, apiSyncProducts, apiGetRecommendations, apiGetPriceHistory, apiGetRules, apiCreateRule, apiUpdateRule } from "@/lib/api";
 
 type Section = "sync" | "analytics" | "finance" | "pricing" | "products" | "orders" | "settings";
 type Platform = "all" | "ozon" | "wb";
@@ -686,6 +686,29 @@ export default function Index() {
 
   // Plan limit error
   const [limitError, setLimitError] = useState<{ msg: string; plan: string; limit: number; current: number } | null>(null);
+
+  // Pricing rules
+  interface PricingRule { id: string; type: string; value: number; enabled: boolean; label: string; description: string; value_label: string; }
+  const [rules, setRules] = useState<PricingRule[]>([]);
+  const [rulesLoading, setRulesLoading] = useState(false);
+  const [newRuleType, setNewRuleType] = useState("increase_margin");
+  const [newRuleValue, setNewRuleValue] = useState("20");
+  const [rulesSaving, setRulesSaving] = useState(false);
+  const RULE_TYPE_META: Record<string, { label: string; description: string; value_label: string; default: number }> = {
+    increase_margin: { label: "Повысить маржу", description: "Если маржа < порога — поднять цену до целевой", value_label: "Целевая маржа (%)", default: 20 },
+    beat_competitor: { label: "Обойти конкурента", description: "Снизить цену на X% при падении продаж", value_label: "Снижение цены (%)", default: 5 },
+    min_margin:      { label: "Минимальная маржа", description: "Не допускать маржу ниже X%", value_label: "Мин. маржа (%)", default: 10 },
+    max_discount:    { label: "Максимальная скидка", description: "Не снижать цену более чем на X%", value_label: "Макс. скидка (%)", default: 15 },
+  };
+
+  const loadRules = useCallback(async () => {
+    setRulesLoading(true);
+    const data = await apiGetRules();
+    if (data?.rules) setRules(data.rules);
+    setRulesLoading(false);
+  }, []);
+
+  useEffect(() => { if (activeSection === "settings") loadRules(); }, [activeSection, loadRules]);
 
   // Dialog state
   const [calcDialogProduct, setCalcDialogProduct] = useState<typeof CALC_PRODUCTS[0] | null>(null);
@@ -1697,6 +1720,129 @@ export default function Index() {
                   ))}
                 </div>
               ))}
+              {/* ── Правила ценообразования ── */}
+              <div className="rounded-lg border border-border overflow-hidden" style={{ background: "hsl(220,14%,9%)" }}>
+                <div className="flex items-center justify-between px-5 py-4 border-b border-border">
+                  <div>
+                    <h2 className="text-sm font-semibold text-foreground">Правила ценообразования</h2>
+                    <p className="text-xs text-muted-foreground mt-0.5">Применяются автоматически при синхронизации</p>
+                  </div>
+                  {rulesLoading && <Icon name="Loader2" size={14} className="animate-spin text-muted-foreground" />}
+                </div>
+
+                {/* Список правил */}
+                <div className="divide-y divide-border">
+                  {rules.length === 0 && !rulesLoading && (
+                    <div className="px-5 py-6 text-center text-sm text-muted-foreground">
+                      Правил пока нет. Добавьте первое ниже.
+                    </div>
+                  )}
+                  {rules.map((rule) => (
+                    <div key={rule.id} className="flex items-center gap-4 px-5 py-3.5 hover:bg-secondary/30 transition-colors">
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-2 mb-0.5">
+                          <p className="text-sm font-medium text-foreground">{rule.label || RULE_TYPE_META[rule.type]?.label || rule.type}</p>
+                          <span className="text-[10px] font-mono-num px-1.5 py-0.5 rounded border border-border text-muted-foreground" style={{ background: "hsl(220,16%,6%)" }}>
+                            {rule.value}{rule.type.includes("margin") || rule.type === "max_discount" ? "%" : "%"}
+                          </span>
+                        </div>
+                        <p className="text-xs text-muted-foreground">{rule.description || RULE_TYPE_META[rule.type]?.description}</p>
+                      </div>
+                      {/* Редактирование value */}
+                      <input
+                        type="number"
+                        min={0.1}
+                        max={100}
+                        step={0.5}
+                        defaultValue={rule.value}
+                        onBlur={async (e) => {
+                          const val = parseFloat(e.target.value);
+                          if (!isNaN(val) && val !== rule.value) {
+                            const data = await apiUpdateRule(rule.id, { value: val });
+                            if (data?.ok) setRules(prev => prev.map(r => r.id === rule.id ? { ...r, value: val } : r));
+                          }
+                        }}
+                        className="w-16 rounded border border-border px-2 py-1 text-xs font-mono-num text-foreground text-right outline-none focus:border-primary/50 transition-colors"
+                        style={{ background: "hsl(220,16%,6%)" }}
+                      />
+                      {/* Toggle включить/выключить */}
+                      <button
+                        onClick={async () => {
+                          const data = await apiUpdateRule(rule.id, { enabled: !rule.enabled });
+                          if (data?.ok) setRules(prev => prev.map(r => r.id === rule.id ? { ...r, enabled: !r.enabled } : r));
+                        }}
+                        className={`w-9 h-5 rounded-full transition-colors relative shrink-0 ${rule.enabled ? "bg-primary" : "bg-secondary"}`}
+                        title={rule.enabled ? "Выключить" : "Включить"}
+                      >
+                        <span className={`absolute top-0.5 w-4 h-4 rounded-full bg-white transition-all ${rule.enabled ? "left-4" : "left-0.5"}`} />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+
+                {/* Добавить новое правило */}
+                <div className="px-5 py-4 border-t border-border" style={{ background: "hsl(220,16%,6%)" }}>
+                  <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-3">Добавить правило</p>
+                  <div className="flex items-end gap-2 flex-wrap">
+                    <div className="flex-1 min-w-[160px]">
+                      <label className="text-xs text-muted-foreground block mb-1">Тип</label>
+                      <select
+                        value={newRuleType}
+                        onChange={(e) => {
+                          setNewRuleType(e.target.value);
+                          setNewRuleValue(String(RULE_TYPE_META[e.target.value]?.default ?? 10));
+                        }}
+                        disabled={Object.keys(RULE_TYPE_META).every(t => rules.some(r => r.type === t))}
+                        className="w-full rounded border border-border px-3 py-2 text-sm text-foreground outline-none focus:border-primary/50 appearance-none cursor-pointer"
+                        style={{ background: "hsl(220,14%,9%)" }}
+                      >
+                        {Object.entries(RULE_TYPE_META).map(([key, meta]) => (
+                          <option key={key} value={key} disabled={rules.some(r => r.type === key)}>
+                            {meta.label}{rules.some(r => r.type === key) ? " (уже добавлено)" : ""}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                    <div className="w-24">
+                      <label className="text-xs text-muted-foreground block mb-1">{RULE_TYPE_META[newRuleType]?.value_label ?? "Значение"}</label>
+                      <input
+                        type="number"
+                        min={0.1}
+                        max={100}
+                        step={0.5}
+                        value={newRuleValue}
+                        onChange={(e) => setNewRuleValue(e.target.value)}
+                        className="w-full rounded border border-border px-3 py-2 text-sm font-mono-num text-foreground outline-none focus:border-primary/50 transition-colors text-right"
+                        style={{ background: "hsl(220,14%,9%)" }}
+                      />
+                    </div>
+                    <button
+                      disabled={rulesSaving || rules.some(r => r.type === newRuleType)}
+                      onClick={async () => {
+                        const val = parseFloat(newRuleValue);
+                        if (isNaN(val) || val <= 0) return;
+                        setRulesSaving(true);
+                        const data = await apiCreateRule(newRuleType, val);
+                        if (data?.rule) {
+                          setRules(prev => [...prev, data.rule]);
+                          const nextType = Object.keys(RULE_TYPE_META).find(t => !rules.some(r => r.type === t) && t !== newRuleType);
+                          if (nextType) { setNewRuleType(nextType); setNewRuleValue(String(RULE_TYPE_META[nextType].default)); }
+                        }
+                        setRulesSaving(false);
+                      }}
+                      className="flex items-center gap-1.5 text-sm px-4 py-2 rounded text-white transition-all hover:opacity-80 disabled:opacity-40 disabled:cursor-not-allowed shrink-0"
+                      style={{ background: "hsl(210,100%,56%)" }}
+                    >
+                      {rulesSaving ? <Icon name="Loader2" size={14} className="animate-spin" /> : <Icon name="Plus" size={14} />}
+                      Добавить
+                    </button>
+                  </div>
+                  <p className="text-[10px] text-muted-foreground mt-2">
+                    {RULE_TYPE_META[newRuleType]?.description}
+                  </p>
+                </div>
+              </div>
+
               <button className="text-sm px-4 py-2.5 rounded text-white transition-all hover:opacity-80" style={{ background: "hsl(210,100%,56%)" }}>
                 Сохранить изменения
               </button>

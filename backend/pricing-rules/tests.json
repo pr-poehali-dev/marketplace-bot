@@ -1,0 +1,20 @@
+{
+  "tests": [
+    {
+      "name": "GET without auth → 401",
+      "method": "GET",
+      "path": "/",
+      "expectedStatus": 401,
+      "expectedBody": {"error": "string"},
+      "bodyMatcher": "partial"
+    },
+    {
+      "name": "GET types without auth → 401",
+      "method": "GET",
+      "path": "/?action=types",
+      "expectedStatus": 401,
+      "expectedBody": {"error": "string"},
+      "bodyMatcher": "partial"
+    }
+  ]
+}

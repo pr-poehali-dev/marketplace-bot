@@ -1,7 +1,7 @@
 import { useState, useMemo, useEffect, useCallback } from "react";
 import Icon from "@/components/ui/icon";
 import { useAuth } from "@/hooks/useAuth";
-import { apiGetProducts, apiGetPrices, apiSavePrice, apiSyncProducts, apiGetRecommendations, apiGetPriceHistory, apiGetRules, apiCreateRule, apiUpdateRule, apiGetIntegration, apiSaveIntegration, apiVerifyIntegration, apiSyncOzon, apiSyncOzonSales, apiSyncOzonFull, apiPushPriceToOzon, apiSaveWbIntegration, apiGetWbIntegration, apiVerifyWbToken, apiSyncWb } from "@/lib/api";
+import { apiGetProducts, apiGetPrices, apiSavePrice, apiSyncProducts, apiGetRecommendations, apiGetPriceHistory, apiGetRules, apiCreateRule, apiUpdateRule, apiGetIntegration, apiSaveIntegration, apiVerifyIntegration, apiSyncOzon, apiSyncOzonSales, apiSyncOzonFull, apiPushPriceToOzon, apiSaveWbIntegration, apiGetWbIntegration, apiVerifyWbToken, apiSyncWb, apiSyncWbSales } from "@/lib/api";
 
 type Section = "sync" | "analytics" | "finance" | "pricing" | "products" | "orders" | "settings";
 type Platform = "all" | "ozon" | "wb";
@@ -808,6 +808,7 @@ export default function Index() {
   const [wbSaving, setWbSaving] = useState(false);
   const [wbVerifying, setWbVerifying] = useState(false);
   const [wbSyncing, setWbSyncing] = useState(false);
+  const [wbSalesSyncing, setWbSalesSyncing] = useState(false);
   const [wbStatus, setWbStatus] = useState<{ ok: boolean; msg: string } | null>(null);
 
   const loadWbIntegration = useCallback(async () => {
@@ -2320,43 +2321,76 @@ export default function Index() {
                     </button>
                   </div>
 
-                  {/* Кнопка синхронизации товаров WB */}
+                  {/* Кнопки синхронизации WB */}
                   {wbIntegration?.connected && (
-                    <div className="pt-3 border-t border-border flex items-center justify-between gap-3">
-                      <div className="min-w-0">
-                        <p className="text-sm font-medium text-foreground">Синхронизировать товары</p>
-                        <p className="text-xs text-muted-foreground mt-0.5">
-                          {wbIntegration.last_sync_at
-                            ? `Последняя: ${new Date(wbIntegration.last_sync_at).toLocaleString("ru-RU", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" })}`
-                            : "Карточки, цены и остатки из WB API"}
-                        </p>
+                    <div className="pt-3 border-t border-border space-y-3">
+                      {/* Товары */}
+                      <div className="flex items-center justify-between gap-3">
+                        <div className="min-w-0">
+                          <p className="text-sm font-medium text-foreground">Товары</p>
+                          <p className="text-xs text-muted-foreground mt-0.5">
+                            {wbIntegration.last_sync_at
+                              ? `Последняя: ${new Date(wbIntegration.last_sync_at).toLocaleString("ru-RU", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" })}`
+                              : "Карточки, цены и остатки из WB API"}
+                          </p>
+                        </div>
+                        <button
+                          disabled={wbSyncing}
+                          onClick={async () => {
+                            setWbSyncing(true);
+                            setWbStatus(null);
+                            const data = await apiSyncWb();
+                            if (data?.ok) {
+                              const changed = data.log?.prices_changed ?? 0;
+                              const updated = data.log?.prices_updated ?? data.prices_updated ?? 0;
+                              setWbStatus({
+                                ok: true,
+                                msg: `WB: ${data.synced} товаров · цен обновлено: ${updated}${changed > 0 ? ` · изменилось: ${changed}` : ""}`,
+                              });
+                              setWbIntegration(prev => prev ? { ...prev, last_sync_at: new Date().toISOString() } : prev);
+                              await loadData();
+                            } else {
+                              setWbStatus({ ok: false, msg: data?.error || "Ошибка синхронизации" });
+                            }
+                            setWbSyncing(false);
+                          }}
+                          className="flex items-center gap-1.5 text-sm px-4 py-2 rounded text-white transition-all hover:opacity-80 disabled:opacity-50 disabled:cursor-not-allowed shrink-0"
+                          style={{ background: "#CB11AB" }}
+                        >
+                          <Icon name="Package" size={14} className={wbSyncing ? "animate-pulse" : ""} />
+                          {wbSyncing ? "Загрузка..." : "Синхронизировать"}
+                        </button>
                       </div>
-                      <button
-                        disabled={wbSyncing}
-                        onClick={async () => {
-                          setWbSyncing(true);
-                          setWbStatus(null);
-                          const data = await apiSyncWb();
-                          if (data?.ok) {
-                            const changed = data.log?.prices_changed ?? 0;
-                            const updated = data.log?.prices_updated ?? data.prices_updated ?? 0;
-                            setWbStatus({
-                              ok: true,
-                              msg: `WB: ${data.synced} товаров · цен обновлено: ${updated}${changed > 0 ? ` · изменилось: ${changed}` : ""}`,
-                            });
-                            setWbIntegration(prev => prev ? { ...prev, last_sync_at: new Date().toISOString() } : prev);
-                            await loadData();
-                          } else {
-                            setWbStatus({ ok: false, msg: data?.error || "Ошибка синхронизации" });
-                          }
-                          setWbSyncing(false);
-                        }}
-                        className="flex items-center gap-1.5 text-sm px-4 py-2 rounded text-white transition-all hover:opacity-80 disabled:opacity-50 disabled:cursor-not-allowed shrink-0"
-                        style={{ background: "#CB11AB" }}
-                      >
-                        <Icon name="RefreshCw" size={14} className={wbSyncing ? "animate-spin" : ""} />
-                        {wbSyncing ? "Загрузка..." : "Синхронизировать"}
-                      </button>
+
+                      {/* Продажи */}
+                      <div className="flex items-center justify-between gap-3">
+                        <div className="min-w-0">
+                          <p className="text-sm font-medium text-foreground">Продажи за 30 дней</p>
+                          <p className="text-xs text-muted-foreground mt-0.5">Заказы WB → обновляет sales и revenue в товарах</p>
+                        </div>
+                        <button
+                          disabled={wbSalesSyncing}
+                          onClick={async () => {
+                            setWbSalesSyncing(true);
+                            setWbStatus(null);
+                            const data = await apiSyncWbSales(30);
+                            if (data?.success) {
+                              setWbStatus({
+                                ok: true,
+                                msg: `WB продажи: ${data.total_orders} заказов · ${Number(data.total_revenue).toLocaleString("ru-RU")} ₽ · обновлено SKU: ${data.products_updated}`,
+                              });
+                              await loadData();
+                            } else {
+                              setWbStatus({ ok: false, msg: data?.error || "Ошибка синхронизации продаж" });
+                            }
+                            setWbSalesSyncing(false);
+                          }}
+                          className="flex items-center gap-1.5 text-sm px-4 py-2 rounded border border-border hover:border-pink-500/50 text-muted-foreground hover:text-foreground transition-all disabled:opacity-50 disabled:cursor-not-allowed shrink-0"
+                        >
+                          <Icon name="TrendingUp" size={14} className={wbSalesSyncing ? "animate-pulse" : ""} />
+                          {wbSalesSyncing ? "Загрузка..." : "Синхронизировать"}
+                        </button>
+                      </div>
                     </div>
                   )}
                 </div>

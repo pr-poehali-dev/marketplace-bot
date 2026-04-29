@@ -3,6 +3,8 @@ import os
 import urllib.request
 import urllib.error
 import psycopg2
+from datetime import datetime, timezone, timedelta
+from collections import defaultdict
 
 SCHEMA = "t_p37499172_marketplace_bot"
 
@@ -364,6 +366,142 @@ def sync_wb_products(user_id: str, api_token: str, conn) -> dict:
         cur.close()
 
 
+# ── Sales sync ────────────────────────────────────────────────────
+
+def fetch_wb_orders(api_token: str, days: int = 30, conn=None, user_id=None) -> list[dict]:
+    """
+    GET /api/v1/supplier/orders — заказы за период.
+
+    Query: dateFrom (ISO 8601), flag=0 — все заказы, не только новые
+    Headers: Authorization: api_token
+
+    Возвращает список заказов. Поля каждого:
+      nmId            — артикул WB (наш SKU)
+      totalPrice      — цена до СПП
+      priceWithDisc   — цена покупателя со всеми скидками
+      finishedPrice   — итоговая цена с учётом СПП
+      isCancel        — флаг отмены
+      orderType       — тип заказа
+    """
+    since = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%S")
+    path  = "/api/v1/supplier/orders"
+
+    try:
+        resp = wb_get(
+            path, api_token,
+            base_url=WB_STATS_API,
+            params={"dateFrom": since, "flag": 0},
+        )
+    except WBAPIError as e:
+        if conn:
+            log_error(conn, user_id, path, e.status_code, str(e))
+        raise
+
+    return resp if isinstance(resp, list) else []
+
+
+def aggregate_wb_sales(orders: list[dict]) -> tuple[dict, int, float]:
+    """
+    Агрегирует заказы по nmId.
+    Исключает отменённые (isCancel=true).
+
+    Возвращает:
+      ({nmId: {sales, revenue, orders}}, total_orders, total_revenue)
+    """
+    by_sku: dict[str, dict] = defaultdict(lambda: {"sales": 0, "revenue": 0.0, "orders": 0})
+    total_orders  = 0
+    total_revenue = 0.0
+
+    for order in orders:
+        if order.get("isCancel"):
+            continue
+
+        nm_id = order.get("nmId")
+        if not nm_id:
+            continue
+
+        sku = str(nm_id)
+        # quantity если есть, иначе 1 заказ = 1 единица
+        qty   = int(order.get("quantity", 1) or 1)
+        # priceWithDisc если есть, иначе totalPrice
+        price = float(order.get("priceWithDisc") or order.get("totalPrice") or 0)
+
+        by_sku[sku]["sales"]   += qty
+        by_sku[sku]["revenue"] += price
+        by_sku[sku]["orders"]  += 1
+
+        total_orders  += 1
+        total_revenue += price
+
+    return dict(by_sku), total_orders, round(total_revenue, 2)
+
+
+def sync_wb_sales(user_id: str, api_token: str, conn, days: int = 30) -> dict:
+    """
+    Синхронизация продаж WB за последние N дней.
+
+    1. GET /api/v1/supplier/orders?dateFrom=... → все заказы
+    2. Агрегация по nmId: sales (qty), revenue (priceWithDisc/totalPrice)
+    3. UPDATE products: sales, revenue, updated_at для своих SKU
+    4. INSERT в sales_aggregates: total_orders, total_revenue, period_days
+    """
+    cur = conn.cursor()
+    try:
+        now   = datetime.now(timezone.utc)
+        since = now - timedelta(days=days)
+
+        # 1. Получаем заказы из WB API
+        orders = fetch_wb_orders(api_token, days=days, conn=conn, user_id=user_id)
+
+        # 2. Агрегация
+        by_sku, total_orders, total_revenue = aggregate_wb_sales(orders)
+
+        # 3. Обновляем products
+        products_updated = 0
+        for sku, agg in by_sku.items():
+            cur.execute(
+                f"""UPDATE {SCHEMA}.products
+                    SET sales      = %s,
+                        revenue    = %s,
+                        updated_at = NOW()
+                    WHERE user_id = %s
+                      AND sku = %s
+                      AND platform = 'WB'
+                    RETURNING sku""",
+                (agg["sales"], round(agg["revenue"], 2), user_id, sku),
+            )
+            if cur.fetchone():
+                products_updated += 1
+
+        # 4. Сохраняем агрегат
+        total_items = sum(v["sales"] for v in by_sku.values())
+        cur.execute(
+            f"""INSERT INTO {SCHEMA}.sales_aggregates
+                (user_id, platform, period_start, period_end,
+                 total_orders, total_revenue, total_items)
+                VALUES (%s, 'wb', %s, %s, %s, %s, %s)""",
+            (user_id, since, now, total_orders, total_revenue, total_items),
+        )
+
+        conn.commit()
+
+        return {
+            "products_updated": products_updated,
+            "total_orders":     total_orders,
+            "total_revenue":    total_revenue,
+            "total_items":      total_items,
+            "skus_in_orders":   len(by_sku),
+            "period_days":      days,
+            "by_sku": [
+                {"sku": sku, "sales": v["sales"], "revenue": round(v["revenue"], 2)}
+                for sku, v in sorted(by_sku.items(), key=lambda x: -x[1]["revenue"])
+            ],
+        }
+
+    finally:
+        cur.close()
+
+
 # ── DB helpers ────────────────────────────────────────────────────
 
 def get_conn():
@@ -408,23 +546,19 @@ def err(msg, code=400):
 
 def handler(event: dict, context) -> dict:
     """
-    Синхронизация товаров Wildberries.
-    POST /sync-wb   Header: X-Auth-Token
+    Синхронизация Wildberries.
 
-    Алгоритм:
-    1. Auth → user_id
-    2. api_token из integrations
-    3. Cooldown 1 час
-    4. /content/v2/get/cards/list → карточки (nmID, title, sizes)
-    5. /api/v3/stocks → остатки
-    6. /public/api/v1/info → цены
-    7. Upsert в products
-    8. Запись в sync_log
+    POST /sync-wb                — товары (карточки + цены + остатки), cooldown 1ч
+    POST /sync-wb?action=sales   — продажи за 30 дней (без cooldown)
+    Header: X-Auth-Token
     """
     if event.get("httpMethod") == "OPTIONS":
         return {"statusCode": 200, "headers": CORS, "body": ""}
     if event.get("httpMethod") != "POST":
         return err("Только POST", 405)
+
+    qs     = event.get("queryStringParameters") or {}
+    action = qs.get("action", "products")
 
     conn = get_conn()
     cur  = conn.cursor()
@@ -433,6 +567,34 @@ def handler(event: dict, context) -> dict:
         if not user_id:
             return err("Не авторизован", 401)
 
+        api_token = get_wb_token(cur, user_id)
+        if not api_token:
+            return err("Интеграция Wildberries не настроена. Добавьте токен в Настройки → WB.", 400)
+
+        # ── action=sales ──────────────────────────────────────────────
+        if action == "sales":
+            body = json.loads(event.get("body") or "{}")
+            days = max(1, min(int(body.get("days", 30)), 90))
+
+            try:
+                stats = sync_wb_sales(user_id, api_token, conn, days=days)
+            except WBAPIError as e:
+                conn.rollback()
+                return err(e.user_message, 502)
+
+            return ok({
+                "success":          True,
+                "platform":         "wb",
+                "products_updated": stats["products_updated"],
+                "total_revenue":    stats["total_revenue"],
+                "total_orders":     stats["total_orders"],
+                "total_items":      stats["total_items"],
+                "skus_in_orders":   stats["skus_in_orders"],
+                "period_days":      stats["period_days"],
+                "by_sku":           stats["by_sku"],
+            })
+
+        # ── action=products (по умолчанию) ────────────────────────────
         # Cooldown 1 час
         cur.execute(
             f"""SELECT started_at FROM {SCHEMA}.sync_log
@@ -442,10 +604,6 @@ def handler(event: dict, context) -> dict:
         )
         if cur.fetchone():
             return err("Синхронизация WB уже выполнялась менее часа назад", 429)
-
-        api_token = get_wb_token(cur, user_id)
-        if not api_token:
-            return err("Интеграция Wildberries не настроена. Добавьте токен в Настройки → WB.", 400)
 
         # Лог: старт
         cur.execute(
@@ -465,12 +623,10 @@ def handler(event: dict, context) -> dict:
             conn.commit()
             return err(e.user_message, 502)
 
-        # Лог: успех
         cur.execute(
             f"UPDATE {SCHEMA}.sync_log SET status='success', products_count=%s, finished_at=NOW() WHERE id=%s",
             (stats["synced"], log_id),
         )
-        # Обновляем last_sync_at в integrations
         cur.execute(
             f"UPDATE {SCHEMA}.integrations SET last_sync_at = NOW() WHERE user_id = %s AND platform = 'wb'",
             (user_id,),

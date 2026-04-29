@@ -1,7 +1,7 @@
 import { useState, useMemo, useEffect, useCallback } from "react";
 import Icon from "@/components/ui/icon";
 import { useAuth } from "@/hooks/useAuth";
-import { apiGetProducts, apiGetPrices, apiSavePrice, apiSyncProducts, apiGetRecommendations, apiGetPriceHistory, apiGetRules, apiCreateRule, apiUpdateRule, apiGetIntegration, apiSaveIntegration, apiVerifyIntegration, apiSyncOzon, apiSyncOzonSales, apiSyncOzonFull } from "@/lib/api";
+import { apiGetProducts, apiGetPrices, apiSavePrice, apiSyncProducts, apiGetRecommendations, apiGetPriceHistory, apiGetRules, apiCreateRule, apiUpdateRule, apiGetIntegration, apiSaveIntegration, apiVerifyIntegration, apiSyncOzon, apiSyncOzonSales, apiSyncOzonFull, apiPushPriceToOzon } from "@/lib/api";
 
 type Section = "sync" | "analytics" | "finance" | "pricing" | "products" | "orders" | "settings";
 type Platform = "all" | "ozon" | "wb";
@@ -421,17 +421,25 @@ function PriceCalcDialog({
   initialPrice,
   onClose,
   onApply,
+  hasOzonIntegration = false,
 }: {
   product: typeof CALC_PRODUCTS[0];
   initialPrice?: number;
   onClose: () => void;
   onApply: (price: number) => void;
+  hasOzonIntegration?: boolean;
 }) {
   const [calcPrice, setCalcPrice] = useState<string>(String(initialPrice ?? product.currentPrice));
   const calcPriceNum = parseFloat(calcPrice) || 0;
   const currentMetrics = useMemo(() => calcMetrics(product, product.currentPrice), [product]);
   const newMetrics = useMemo(() => calcMetrics(product, calcPriceNum), [product, calcPriceNum]);
   const accent = product.platform === "Ozon" ? "#005BFF" : "#CB11AB";
+
+  const [ozonPushing, setOzonPushing] = useState(false);
+  const [ozonPushResult, setOzonPushResult] = useState<{ ok: boolean; msg: string } | null>(null);
+
+  const isOzon = product.platform === "Ozon";
+  const canPushToOzon = isOzon && hasOzonIntegration && calcPriceNum > 0;
 
   return (
     <div
@@ -598,22 +606,76 @@ function PriceCalcDialog({
         </div>
 
         {/* Footer actions */}
-        <div className="px-5 py-4 border-t border-border flex items-center justify-between gap-3 sticky bottom-0" style={{ background: "hsl(220,14%,9%)" }}>
-          <button
-            onClick={onClose}
-            className="text-sm px-4 py-2 rounded border border-border text-muted-foreground hover:text-foreground hover:border-primary/40 transition-all"
-          >
-            Отмена
-          </button>
-          <button
-            onClick={() => { onApply(calcPriceNum); onClose(); }}
-            disabled={calcPriceNum <= 0 || calcPriceNum === product.currentPrice}
-            className="flex items-center gap-2 text-sm px-5 py-2 rounded text-white font-medium transition-all disabled:opacity-40 disabled:cursor-not-allowed"
-            style={{ background: product.platform === "Ozon" ? "#005BFF" : "#CB11AB" }}
-          >
-            <Icon name="Check" size={14} />
-            Применить цену · {calcPriceNum > 0 ? calcPriceNum.toLocaleString("ru-RU") : "—"} ₽
-          </button>
+        <div className="px-5 py-4 border-t border-border sticky bottom-0 space-y-3" style={{ background: "hsl(220,14%,9%)" }}>
+          {/* Результат Ozon push */}
+          {ozonPushResult && (
+            <div className={`flex items-center gap-2 text-xs px-3 py-2 rounded-lg border ${ozonPushResult.ok ? "text-green-400 bg-green-400/8 border-green-400/25" : "text-red-400 bg-red-400/8 border-red-400/25"}`}>
+              <Icon name={ozonPushResult.ok ? "CheckCircle2" : "XCircle"} size={13} />
+              {ozonPushResult.msg}
+            </div>
+          )}
+
+          <div className="flex items-center justify-between gap-3">
+            <button
+              onClick={onClose}
+              className="text-sm px-4 py-2 rounded border border-border text-muted-foreground hover:text-foreground hover:border-primary/40 transition-all"
+            >
+              Отмена
+            </button>
+
+            <div className="flex items-center gap-2">
+              {/* Применить локально */}
+              <button
+                onClick={() => { onApply(calcPriceNum); onClose(); }}
+                disabled={calcPriceNum <= 0 || calcPriceNum === product.currentPrice}
+                className="flex items-center gap-2 text-sm px-4 py-2 rounded border border-border text-muted-foreground hover:text-foreground hover:border-primary/40 transition-all disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                <Icon name="Check" size={14} />
+                Применить · {calcPriceNum > 0 ? calcPriceNum.toLocaleString("ru-RU") : "—"} ₽
+              </button>
+
+              {/* Применить в Ozon */}
+              {canPushToOzon && (
+                <button
+                  disabled={ozonPushing || calcPriceNum <= 0}
+                  onClick={async () => {
+                    setOzonPushing(true);
+                    setOzonPushResult(null);
+                    const data = await apiPushPriceToOzon(product.sku, calcPriceNum);
+                    if (data?.ok) {
+                      setOzonPushResult({ ok: true, msg: `Цена ${calcPriceNum.toLocaleString("ru-RU")} ₽ обновлена на Ozon` });
+                      onApply(calcPriceNum);
+                      setTimeout(onClose, 1500);
+                    } else {
+                      setOzonPushResult({ ok: false, msg: data?.error || "Не удалось обновить цену на Ozon" });
+                    }
+                    setOzonPushing(false);
+                  }}
+                  className="flex items-center gap-2 text-sm px-5 py-2 rounded text-white font-medium transition-all hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed"
+                  style={{ background: "#005BFF" }}
+                >
+                  {ozonPushing
+                    ? <Icon name="Loader2" size={14} className="animate-spin" />
+                    : <Icon name="Zap" size={14} />
+                  }
+                  {ozonPushing ? "Отправка..." : "Применить в Ozon"}
+                </button>
+              )}
+
+              {/* Обычная кнопка для не-Ozon или без интеграции */}
+              {!canPushToOzon && (
+                <button
+                  onClick={() => { onApply(calcPriceNum); onClose(); }}
+                  disabled={calcPriceNum <= 0 || calcPriceNum === product.currentPrice}
+                  className="flex items-center gap-2 text-sm px-5 py-2 rounded text-white font-medium transition-all disabled:opacity-40 disabled:cursor-not-allowed"
+                  style={{ background: accent }}
+                >
+                  <Icon name="Check" size={14} />
+                  Применить цену · {calcPriceNum > 0 ? calcPriceNum.toLocaleString("ru-RU") : "—"} ₽
+                </button>
+              )}
+            </div>
+          </div>
         </div>
       </div>
     </div>
@@ -872,6 +934,7 @@ export default function Index() {
           initialPrice={calcDialogInitPrice}
           onClose={() => setCalcDialogProduct(null)}
           onApply={applyPrice}
+          hasOzonIntegration={!!ozonIntegration?.connected}
         />
       )}
 

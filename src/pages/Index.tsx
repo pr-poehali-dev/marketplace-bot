@@ -1,7 +1,7 @@
 import { useState, useMemo, useEffect, useCallback } from "react";
 import Icon from "@/components/ui/icon";
 import { useAuth } from "@/hooks/useAuth";
-import { apiGetProducts, apiGetPrices, apiSavePrice, apiSyncProducts, apiGetRecommendations, apiGetPriceHistory, apiGetRules, apiCreateRule, apiUpdateRule, apiGetIntegration, apiSaveIntegration, apiVerifyIntegration, apiSyncOzon, apiSyncOzonSales } from "@/lib/api";
+import { apiGetProducts, apiGetPrices, apiSavePrice, apiSyncProducts, apiGetRecommendations, apiGetPriceHistory, apiGetRules, apiCreateRule, apiUpdateRule, apiGetIntegration, apiSaveIntegration, apiVerifyIntegration, apiSyncOzon, apiSyncOzonSales, apiSyncOzonFull } from "@/lib/api";
 
 type Section = "sync" | "analytics" | "finance" | "pricing" | "products" | "orders" | "settings";
 type Platform = "all" | "ozon" | "wb";
@@ -718,6 +718,7 @@ export default function Index() {
   const [ozonVerifying, setOzonVerifying] = useState(false);
   const [ozonSyncing, setOzonSyncing] = useState(false);
   const [ozonSalesSyncing, setOzonSalesSyncing] = useState(false);
+  const [ozonFullSyncing, setOzonFullSyncing] = useState(false);
   const [ozonStatus, setOzonStatus] = useState<{ ok: boolean; msg: string } | null>(null);
 
   const loadOzonIntegration = useCallback(async () => {
@@ -1979,6 +1980,43 @@ export default function Index() {
                   {/* Кнопки синхронизации (показываются если интеграция настроена) */}
                   {ozonIntegration?.connected && (
                     <div className="pt-3 border-t border-border space-y-3">
+
+                      {/* Полная синхронизация */}
+                      <div className="flex items-center justify-between gap-3 p-3 rounded-lg border border-border" style={{ background: "hsl(220,16%,6%)" }}>
+                        <div className="min-w-0">
+                          <div className="flex items-center gap-2 mb-0.5">
+                            <p className="text-sm font-semibold text-foreground">Полная синхронизация</p>
+                            <span className="text-[10px] px-1.5 py-0.5 rounded border border-blue-400/25 text-blue-400 bg-blue-400/10 font-medium">Рекомендуется</span>
+                          </div>
+                          <p className="text-xs text-muted-foreground">Товары + цены + остатки + продажи за 30 дней · раз в час</p>
+                        </div>
+                        <button
+                          disabled={ozonFullSyncing || ozonSyncing || ozonSalesSyncing}
+                          onClick={async () => {
+                            setOzonFullSyncing(true);
+                            setOzonStatus(null);
+                            const data = await apiSyncOzonFull();
+                            if (data?.ok) {
+                              const s = data.summary;
+                              const errs = data.errors?.length ? ` · ⚠️ ${data.errors.join(", ")}` : "";
+                              setOzonStatus({
+                                ok: !data.errors?.length,
+                                msg: `Товаров: ${s.products_synced} · цен обновлено: ${s.prices_updated} · заказов: ${s.total_orders} · выручка: ${Number(s.total_revenue).toLocaleString("ru-RU")} ₽${errs}`,
+                              });
+                              await loadData();
+                            } else {
+                              setOzonStatus({ ok: false, msg: data?.error || "Ошибка полной синхронизации" });
+                            }
+                            setOzonFullSyncing(false);
+                          }}
+                          className="flex items-center gap-1.5 text-sm px-4 py-2 rounded text-white transition-all hover:opacity-80 disabled:opacity-50 disabled:cursor-not-allowed shrink-0"
+                          style={{ background: "#005BFF" }}
+                        >
+                          <Icon name="Zap" size={14} className={ozonFullSyncing ? "animate-pulse" : ""} />
+                          {ozonFullSyncing ? "Синхронизация..." : "Запустить"}
+                        </button>
+                      </div>
+
                       {/* Товары */}
                       <div className="flex items-center justify-between gap-3">
                         <div className="min-w-0">

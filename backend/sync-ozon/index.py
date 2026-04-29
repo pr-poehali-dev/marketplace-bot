@@ -477,11 +477,70 @@ def err(msg, code=400):
 
 # ── Handler ────────────────────────────────────────────────────────
 
+# ── Full sync ──────────────────────────────────────────────────────
+
+def sync_ozon_full(user_id: str, client_id: str, api_key: str, conn) -> dict:
+    """
+    Полная синхронизация Ozon за один вызов:
+      1. sync_ozon_products  — список товаров + цены (/v2/product/list, /v4/product/info/prices, /v3/product/info/stocks)
+      2. sync_ozon_sales     — продажи FBO за 30 дней (/v2/posting/fbo/list)
+
+    Каждый шаг выполняется независимо: ошибка в одном не останавливает другие.
+    После успеха обновляет integrations.last_sync_at.
+    """
+    cur = conn.cursor()
+    errors: list[str] = []
+
+    # ── Шаг 1: товары + цены ─────────────────────────────────────────
+    products_stats: dict = {}
+    try:
+        products_stats = sync_ozon_products(user_id, client_id, api_key, conn)
+    except RuntimeError as e:
+        errors.append(f"products: {e}")
+
+    # ── Шаг 2: продажи ───────────────────────────────────────────────
+    sales_stats: dict = {}
+    try:
+        sales_stats = sync_ozon_sales(user_id, client_id, api_key, conn, days=30)
+    except RuntimeError as e:
+        errors.append(f"sales: {e}")
+
+    # ── Обновляем last_sync_at ────────────────────────────────────────
+    cur.execute(
+        f"""UPDATE {SCHEMA}.integrations
+            SET last_sync_at = NOW()
+            WHERE user_id = %s AND platform = 'ozon'""",
+        (user_id,),
+    )
+    conn.commit()
+    cur.close()
+
+    return {
+        "products": {
+            "synced":         products_stats.get("synced", 0),
+            "prices_updated": products_stats.get("prices_updated", 0),
+            "prices_changed": sum(
+                1 for p in products_stats.get("products", []) if p.get("price_changed")
+            ),
+        },
+        "sales": {
+            "total_orders":  sales_stats.get("total_orders", 0),
+            "total_items":   sales_stats.get("total_items", 0),
+            "total_revenue": sales_stats.get("total_revenue", 0.0),
+            "skus_updated":  sales_stats.get("skus_updated", 0),
+        },
+        "errors": errors,
+    }
+
+
+# ── Handler ────────────────────────────────────────────────────────
+
 def handler(event: dict, context) -> dict:
     """
     Синхронизация данных Ozon.
-    POST /sync-ozon                  — синхронизация товаров (список + цены + остатки)
-    POST /sync-ozon?action=sales     — синхронизация продаж (FBO за 30 дней)
+    POST /sync-ozon                — только товары (список + цены + остатки)
+    POST /sync-ozon?action=sales   — только продажи (FBO 30 дней)
+    POST /sync-ozon?action=full    — полная синхронизация (товары + продажи), cooldown 1 ч
     Header: X-Auth-Token
     """
     if event.get("httpMethod") == "OPTIONS":
@@ -490,7 +549,7 @@ def handler(event: dict, context) -> dict:
         return err("Только POST", 405)
 
     qs     = event.get("queryStringParameters") or {}
-    action = qs.get("action", "products")   # "products" | "sales"
+    action = qs.get("action", "products")   # "products" | "sales" | "full"
 
     conn = get_conn()
     cur  = conn.cursor()
@@ -503,11 +562,73 @@ def handler(event: dict, context) -> dict:
         if not client_id or not api_key:
             return err("Интеграция Ozon не настроена. Добавьте ключи в Настройки → Ozon.", 400)
 
+        # ── action=full ───────────────────────────────────────────────
+        if action == "full":
+            # Cooldown: проверяем last_sync_at в integrations
+            cur.execute(
+                f"""SELECT last_sync_at FROM {SCHEMA}.integrations
+                    WHERE user_id = %s AND platform = 'ozon'""",
+                (user_id,),
+            )
+            row = cur.fetchone()
+            if row and row[0]:
+                last = row[0]
+                diff = datetime.now(timezone.utc) - last.replace(tzinfo=timezone.utc)
+                if diff.total_seconds() < 3600:
+                    remaining = int(3600 - diff.total_seconds()) // 60
+                    return err(
+                        f"Полная синхронизация доступна раз в час. "
+                        f"Следующая через ~{remaining} мин.",
+                        429,
+                    )
+
+            # Лог: старт полной синхронизации
+            cur.execute(
+                f"INSERT INTO {SCHEMA}.sync_log (user_id, platform, status) VALUES (%s, 'ozon', 'running') RETURNING id",
+                (user_id,),
+            )
+            log_id = cur.fetchone()[0]
+            conn.commit()
+
+            result = sync_ozon_full(user_id, client_id, api_key, conn)
+
+            # Лог: завершение
+            total_products = result["products"]["synced"]
+            status = "success" if not result["errors"] else "partial"
+            cur.execute(
+                f"""UPDATE {SCHEMA}.sync_log
+                    SET status=%s, products_count=%s, finished_at=NOW(),
+                        error=%s
+                    WHERE id=%s""",
+                (
+                    status,
+                    total_products,
+                    "; ".join(result["errors"]) if result["errors"] else None,
+                    log_id,
+                ),
+            )
+            conn.commit()
+
+            return ok({
+                "ok":       True,
+                "action":   "full",
+                "platform": "ozon",
+                "summary": {
+                    "products_synced":   result["products"]["synced"],
+                    "prices_updated":    result["products"]["prices_updated"],
+                    "prices_changed":    result["products"]["prices_changed"],
+                    "total_orders":      result["sales"]["total_orders"],
+                    "total_items":       result["sales"]["total_items"],
+                    "total_revenue":     result["sales"]["total_revenue"],
+                    "skus_updated":      result["sales"]["skus_updated"],
+                },
+                "errors":   result["errors"],
+            })
+
         # ── action=sales ──────────────────────────────────────────────
-        if action == "sales":
+        elif action == "sales":
             body = json.loads(event.get("body") or "{}")
-            days = int(body.get("days", 30))
-            days = max(1, min(days, 90))   # 1–90 дней
+            days = max(1, min(int(body.get("days", 30)), 90))
 
             try:
                 stats = sync_ozon_sales(user_id, client_id, api_key, conn, days)
@@ -515,61 +636,55 @@ def handler(event: dict, context) -> dict:
                 conn.rollback()
                 return err(f"Ошибка Ozon API: {e}", 502)
 
-            return ok({
-                "ok":       True,
-                "action":   "sales",
-                "platform": "ozon",
-                **stats,
-            })
+            return ok({"ok": True, "action": "sales", "platform": "ozon", **stats})
 
         # ── action=products (по умолчанию) ────────────────────────────
-        # Cooldown 1 час для синхронизации товаров
-        cur.execute(
-            f"""SELECT started_at FROM {SCHEMA}.sync_log
-                WHERE user_id = %s AND platform = 'ozon' AND status = 'success'
-                AND started_at > NOW() - INTERVAL '1 hour' LIMIT 1""",
-            (user_id,),
-        )
-        if cur.fetchone():
-            return err("Синхронизация Ozon уже выполнялась менее часа назад", 429)
-
-        # Лог: старт
-        cur.execute(
-            f"INSERT INTO {SCHEMA}.sync_log (user_id, platform, status) VALUES (%s, 'ozon', 'running') RETURNING id",
-            (user_id,),
-        )
-        log_id = cur.fetchone()[0]
-        conn.commit()
-
-        try:
-            stats = sync_ozon_products(user_id, client_id, api_key, conn)
-        except RuntimeError as e:
+        else:
             cur.execute(
-                f"UPDATE {SCHEMA}.sync_log SET status='error', error=%s, finished_at=NOW() WHERE id=%s",
-                (str(e), log_id),
+                f"""SELECT started_at FROM {SCHEMA}.sync_log
+                    WHERE user_id = %s AND platform = 'ozon' AND status = 'success'
+                    AND started_at > NOW() - INTERVAL '1 hour' LIMIT 1""",
+                (user_id,),
+            )
+            if cur.fetchone():
+                return err("Синхронизация Ozon уже выполнялась менее часа назад", 429)
+
+            cur.execute(
+                f"INSERT INTO {SCHEMA}.sync_log (user_id, platform, status) VALUES (%s, 'ozon', 'running') RETURNING id",
+                (user_id,),
+            )
+            log_id = cur.fetchone()[0]
+            conn.commit()
+
+            try:
+                stats = sync_ozon_products(user_id, client_id, api_key, conn)
+            except RuntimeError as e:
+                cur.execute(
+                    f"UPDATE {SCHEMA}.sync_log SET status='error', error=%s, finished_at=NOW() WHERE id=%s",
+                    (str(e), log_id),
+                )
+                conn.commit()
+                return err(f"Ошибка Ozon API: {e}", 502)
+
+            cur.execute(
+                f"UPDATE {SCHEMA}.sync_log SET status='success', products_count=%s, finished_at=NOW() WHERE id=%s",
+                (stats["synced"], log_id),
             )
             conn.commit()
-            return err(f"Ошибка Ozon API: {e}", 502)
 
-        cur.execute(
-            f"UPDATE {SCHEMA}.sync_log SET status='success', products_count=%s, finished_at=NOW() WHERE id=%s",
-            (stats["synced"], log_id),
-        )
-        conn.commit()
-
-        return ok({
-            "ok":             True,
-            "action":         "products",
-            "platform":       "ozon",
-            "synced":         stats["synced"],
-            "prices_updated": stats["prices_updated"],
-            "products":       stats["products"],
-            "log": {
-                "total_products": stats["synced"],
+            return ok({
+                "ok":             True,
+                "action":         "products",
+                "platform":       "ozon",
+                "synced":         stats["synced"],
                 "prices_updated": stats["prices_updated"],
-                "prices_changed": sum(1 for p in stats["products"] if p.get("price_changed")),
-            },
-        })
+                "products":       stats["products"],
+                "log": {
+                    "total_products": stats["synced"],
+                    "prices_updated": stats["prices_updated"],
+                    "prices_changed": sum(1 for p in stats["products"] if p.get("price_changed")),
+                },
+            })
 
     except Exception as e:
         conn.rollback()

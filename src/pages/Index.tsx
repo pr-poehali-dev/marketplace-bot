@@ -168,7 +168,7 @@ const STATUS_LABEL: Record<string, { label: string; color: string }> = {
   cancelled: { label: "Отменён", color: "text-red-400" },
 };
 
-const SECTIONS_WITH_PLATFORM: Section[] = ["analytics", "finance", "products", "orders", "pricing"];
+const SECTIONS_WITH_PLATFORM: Section[] = ["analytics", "finance", "orders", "pricing"];
 
 function PlatformSwitcher({ active, onChange }: { active: Platform; onChange: (p: Platform) => void }) {
   return (
@@ -797,6 +797,11 @@ export default function Index() {
   const [ozonTableResult, setOzonTableResult] = useState<{ ok: boolean; msg: string } | null>(null);
   const [ozonTableCooldown, setOzonTableCooldown] = useState(false);
 
+  // WB кнопка в таблице
+  const [wbTableSyncing, setWbTableSyncing] = useState(false);
+  const [wbTableResult, setWbTableResult] = useState<{ ok: boolean; msg: string } | null>(null);
+  const [wbTableCooldown, setWbTableCooldown] = useState(false);
+
   const loadOzonIntegration = useCallback(async () => {
     const data = await apiGetIntegration("ozon");
     if (data?.integration) {
@@ -824,7 +829,16 @@ export default function Index() {
 
   const loadWbIntegration = useCallback(async () => {
     const data = await apiGetWbIntegration();
-    if (data?.integration) setWbIntegration(data.integration);
+    if (data?.integration) {
+      setWbIntegration(data.integration);
+      if (data.integration.last_sync_at) {
+        const diff = Date.now() - new Date(data.integration.last_sync_at).getTime();
+        if (diff < 3600_000) {
+          setWbTableCooldown(true);
+          setTimeout(() => setWbTableCooldown(false), 3600_000 - diff);
+        }
+      }
+    }
   }, []);
 
   useEffect(() => {
@@ -1503,10 +1517,15 @@ export default function Index() {
               })()}
 
               <div className="flex items-center justify-between gap-3 flex-wrap">
-                <div className="flex items-center gap-2 border border-border rounded px-3 py-2 w-64" style={{ background: "hsl(220,14%,9%)" }}>
-                  <Icon name="Search" size={14} className="text-muted-foreground" />
-                  <input className="bg-transparent text-sm text-foreground placeholder:text-muted-foreground outline-none w-full" placeholder="Поиск по каталогу..." />
+                <div className="flex items-center gap-3 flex-wrap">
+                  <div className="flex items-center gap-2 border border-border rounded px-3 py-2 w-64" style={{ background: "hsl(220,14%,9%)" }}>
+                    <Icon name="Search" size={14} className="text-muted-foreground" />
+                    <input className="bg-transparent text-sm text-foreground placeholder:text-muted-foreground outline-none w-full" placeholder="Поиск по каталогу..." />
+                  </div>
+                  {/* Фильтр платформы прямо в таблице */}
+                  <PlatformSwitcher active={platform} onChange={setPlatform} />
                 </div>
+
                 <div className="flex items-center gap-2 flex-wrap justify-end">
                   {/* Время последней Ozon-синхронизации */}
                   {ozonIntegration?.last_sync_at && (
@@ -1516,10 +1535,25 @@ export default function Index() {
                     </span>
                   )}
 
+                  {/* Время последней WB-синхронизации */}
+                  {wbIntegration?.last_sync_at && (
+                    <span className="text-xs text-muted-foreground hidden md:flex items-center gap-1">
+                      <span className="w-1.5 h-1.5 rounded-full" style={{ background: "#CB11AB" }} />
+                      WB: {new Date(wbIntegration.last_sync_at).toLocaleString("ru-RU", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" })}
+                    </span>
+                  )}
+
                   {/* Результат Ozon-синхронизации из таблицы */}
                   {ozonTableResult && (
                     <span className={`text-xs max-w-xs truncate ${ozonTableResult.ok ? "text-green-400" : "text-red-400"}`}>
                       {ozonTableResult.msg}
+                    </span>
+                  )}
+
+                  {/* Результат WB-синхронизации из таблицы */}
+                  {wbTableResult && (
+                    <span className={`text-xs max-w-xs truncate ${wbTableResult.ok ? "text-green-400" : "text-red-400"}`}>
+                      {wbTableResult.msg}
                     </span>
                   )}
 
@@ -1563,8 +1597,55 @@ export default function Index() {
                     </button>
                   )}
 
+                  {/* Кнопка WB (показывается если интеграция настроена) */}
+                  {wbIntegration?.connected && (
+                    <button
+                      onClick={async () => {
+                        setWbTableSyncing(true);
+                        setWbTableResult(null);
+                        const data = await apiSyncWbFull();
+                        if (data?.success) {
+                          const errs = data.errors?.length ? ` · ⚠️` : "";
+                          setWbTableResult({
+                            ok: !data.errors?.length,
+                            msg: `✓ WB: ${data.products_synced} тов · цены: ${data.prices_updated} · продажи: ${data.sales_updated} · ${Number(data.total_revenue).toLocaleString("ru-RU")} ₽${errs}`,
+                          });
+                          setWbTableCooldown(true);
+                          setTimeout(() => setWbTableCooldown(false), 3600_000);
+                          if (data.last_sync_at) {
+                            setWbIntegration(prev => prev ? { ...prev, last_sync_at: data.last_sync_at } : prev);
+                          }
+                          await loadData();
+                        } else {
+                          // Понятное сообщение если cooldown
+                          const msg = data?.error || "Ошибка синхронизации";
+                          setWbTableResult({ ok: false, msg });
+                          // Если сообщение о лимите 1 раз в час — блокируем кнопку
+                          if (msg.toLowerCase().includes("раз в час")) {
+                            setWbTableCooldown(true);
+                          }
+                        }
+                        setWbTableSyncing(false);
+                      }}
+                      disabled={wbTableSyncing || wbTableCooldown}
+                      title={wbTableCooldown ? "Синхронизация WB доступна раз в час" : "Синхронизировать WB (товары + цены + продажи)"}
+                      className="flex items-center gap-1.5 text-sm px-3 py-2 rounded border transition-all disabled:opacity-40 disabled:cursor-not-allowed"
+                      style={wbTableCooldown
+                        ? { borderColor: "hsl(220,12%,20%)", color: "hsl(215,14%,40%)", background: "hsl(220,14%,9%)" }
+                        : { borderColor: "#CB11AB40", color: "#e879f9", background: "rgba(203,17,171,0.08)" }
+                      }
+                    >
+                      <Icon name="RefreshCw" size={13} className={wbTableSyncing ? "animate-spin" : ""} />
+                      {wbTableSyncing
+                        ? "WB..."
+                        : wbTableCooldown
+                        ? "WB (1ч)"
+                        : "Синхронизировать WB"}
+                    </button>
+                  )}
+
                   {/* Обычная кнопка синхронизации (демо / без интеграции) */}
-                  {!ozonIntegration?.connected && (
+                  {!ozonIntegration?.connected && !wbIntegration?.connected && (
                     <>
                       {lastSyncTime && (
                         <span className="text-xs text-muted-foreground hidden sm:block">

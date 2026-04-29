@@ -1,7 +1,7 @@
 import { useState, useMemo, useEffect, useCallback } from "react";
 import Icon from "@/components/ui/icon";
 import { useAuth } from "@/hooks/useAuth";
-import { apiGetProducts, apiGetPrices, apiSavePrice, apiSyncProducts, apiGetRecommendations, apiGetPriceHistory, apiGetRules, apiCreateRule, apiUpdateRule, apiGetIntegration, apiSaveIntegration, apiVerifyIntegration, apiSyncOzon, apiSyncOzonSales, apiSyncOzonFull, apiPushPriceToOzon, apiSaveWbIntegration, apiGetWbIntegration, apiVerifyWbToken } from "@/lib/api";
+import { apiGetProducts, apiGetPrices, apiSavePrice, apiSyncProducts, apiGetRecommendations, apiGetPriceHistory, apiGetRules, apiCreateRule, apiUpdateRule, apiGetIntegration, apiSaveIntegration, apiVerifyIntegration, apiSyncOzon, apiSyncOzonSales, apiSyncOzonFull, apiPushPriceToOzon, apiSaveWbIntegration, apiGetWbIntegration, apiVerifyWbToken, apiSyncWb } from "@/lib/api";
 
 type Section = "sync" | "analytics" | "finance" | "pricing" | "products" | "orders" | "settings";
 type Platform = "all" | "ozon" | "wb";
@@ -807,6 +807,7 @@ export default function Index() {
   const [wbApiToken, setWbApiToken] = useState("");
   const [wbSaving, setWbSaving] = useState(false);
   const [wbVerifying, setWbVerifying] = useState(false);
+  const [wbSyncing, setWbSyncing] = useState(false);
   const [wbStatus, setWbStatus] = useState<{ ok: boolean; msg: string } | null>(null);
 
   const loadWbIntegration = useCallback(async () => {
@@ -2318,6 +2319,41 @@ export default function Index() {
                       Сохранить
                     </button>
                   </div>
+
+                  {/* Кнопка синхронизации товаров WB */}
+                  {wbIntegration?.connected && (
+                    <div className="pt-3 border-t border-border flex items-center justify-between gap-3">
+                      <div className="min-w-0">
+                        <p className="text-sm font-medium text-foreground">Синхронизировать товары</p>
+                        <p className="text-xs text-muted-foreground mt-0.5">
+                          {wbIntegration.last_sync_at
+                            ? `Последняя: ${new Date(wbIntegration.last_sync_at).toLocaleString("ru-RU", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" })}`
+                            : "Карточки, цены и остатки из WB API"}
+                        </p>
+                      </div>
+                      <button
+                        disabled={wbSyncing}
+                        onClick={async () => {
+                          setWbSyncing(true);
+                          setWbStatus(null);
+                          const data = await apiSyncWb();
+                          if (data?.ok) {
+                            setWbStatus({ ok: true, msg: `Синхронизировано ${data.synced} товаров из Wildberries` });
+                            setWbIntegration(prev => prev ? { ...prev, last_sync_at: new Date().toISOString() } : prev);
+                            await loadData();
+                          } else {
+                            setWbStatus({ ok: false, msg: data?.error || "Ошибка синхронизации" });
+                          }
+                          setWbSyncing(false);
+                        }}
+                        className="flex items-center gap-1.5 text-sm px-4 py-2 rounded text-white transition-all hover:opacity-80 disabled:opacity-50 disabled:cursor-not-allowed shrink-0"
+                        style={{ background: "#CB11AB" }}
+                      >
+                        <Icon name="RefreshCw" size={14} className={wbSyncing ? "animate-spin" : ""} />
+                        {wbSyncing ? "Загрузка..." : "Синхронизировать"}
+                      </button>
+                    </div>
+                  )}
                 </div>
               </div>
 

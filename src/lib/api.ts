@@ -166,6 +166,19 @@ export async function apiVerifyWbToken(api_key: string) {
   return parseResponse(res);
 }
 
+// ── Sync WB ──────────────────────────────────────────────────────
+
+const SYNC_WB_URL = "https://functions.poehali.dev/5807e14f-3bec-46dd-966f-0cdf26eeb8e9";
+
+export async function apiSyncWb() {
+  const res = await fetch(SYNC_WB_URL, {
+    method: "POST",
+    headers: authHeaders(),
+    body: JSON.stringify({}),
+  });
+  return parseResponse(res);
+}
+
 // ── Sync Ozon ─────────────────────────────────────────────────────
 
 const SYNC_OZON_URL = "https://functions.poehali.dev/6012000a-4e18-49a7-9787-fc0a61d7d90c";

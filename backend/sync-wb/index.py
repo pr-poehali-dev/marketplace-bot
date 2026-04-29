@@ -544,12 +544,48 @@ def err(msg, code=400):
 
 # ── Handler ───────────────────────────────────────────────────────
 
+# ── Full sync ─────────────────────────────────────────────────────
+
+def sync_wb_full(user_id: str, api_token: str, conn) -> dict:
+    """
+    Полная синхронизация WB.
+    Последовательно:
+      1. sync_wb_products — карточки + цены (включает /api/v2/list/goods/filter)
+      2. sync_wb_sales    — заказы за 30 дней
+    Каждый шаг изолирован: ошибка не прерывает другие.
+    """
+    errors: list[str] = []
+
+    products_stats: dict = {}
+    try:
+        products_stats = sync_wb_products(user_id, api_token, conn)
+    except WBAPIError as e:
+        errors.append(f"products: {e.user_message}")
+
+    sales_stats: dict = {}
+    try:
+        sales_stats = sync_wb_sales(user_id, api_token, conn, days=30)
+    except WBAPIError as e:
+        errors.append(f"sales: {e.user_message}")
+
+    return {
+        "products_synced":  products_stats.get("synced", 0),
+        "prices_updated":   products_stats.get("prices_updated", 0),
+        "prices_changed":   products_stats.get("prices_changed", 0),
+        "sales_updated":    sales_stats.get("products_updated", 0),
+        "total_revenue":    sales_stats.get("total_revenue", 0.0),
+        "total_orders":     sales_stats.get("total_orders", 0),
+        "errors":           errors,
+    }
+
+
 def handler(event: dict, context) -> dict:
     """
     Синхронизация Wildberries.
 
     POST /sync-wb                — товары (карточки + цены + остатки), cooldown 1ч
     POST /sync-wb?action=sales   — продажи за 30 дней (без cooldown)
+    POST /sync-wb?action=full    — полная: товары + цены + продажи, cooldown 1ч
     Header: X-Auth-Token
     """
     if event.get("httpMethod") == "OPTIONS":
@@ -570,6 +606,65 @@ def handler(event: dict, context) -> dict:
         api_token = get_wb_token(cur, user_id)
         if not api_token:
             return err("Интеграция Wildberries не настроена. Добавьте токен в Настройки → WB.", 400)
+
+        # ── action=full ───────────────────────────────────────────────
+        if action == "full":
+            # Cooldown по integrations.last_sync_at
+            cur.execute(
+                f"""SELECT last_sync_at FROM {SCHEMA}.integrations
+                    WHERE user_id = %s AND platform = 'wb'""",
+                (user_id,),
+            )
+            row = cur.fetchone()
+            if row and row[0]:
+                last = row[0]
+                diff = datetime.now(timezone.utc) - last.replace(tzinfo=timezone.utc)
+                if diff.total_seconds() < 3600:
+                    return err("Синхронизация доступна раз в час", 429)
+
+            # Лог: старт
+            cur.execute(
+                f"INSERT INTO {SCHEMA}.sync_log (user_id, platform, status) VALUES (%s, 'wb', 'running') RETURNING id",
+                (user_id,),
+            )
+            log_id = cur.fetchone()[0]
+            conn.commit()
+
+            stats = sync_wb_full(user_id, api_token, conn)
+
+            # Обновляем last_sync_at + лог
+            cur.execute(
+                f"UPDATE {SCHEMA}.integrations SET last_sync_at = NOW() WHERE user_id = %s AND platform = 'wb' RETURNING last_sync_at",
+                (user_id,),
+            )
+            last_sync_row = cur.fetchone()
+            last_sync_at  = str(last_sync_row[0]) if last_sync_row else None
+
+            cur.execute(
+                f"""UPDATE {SCHEMA}.sync_log
+                    SET status=%s, products_count=%s, error=%s, finished_at=NOW()
+                    WHERE id=%s""",
+                (
+                    "success" if not stats["errors"] else "partial",
+                    stats["products_synced"],
+                    "; ".join(stats["errors"]) if stats["errors"] else None,
+                    log_id,
+                ),
+            )
+            conn.commit()
+
+            return ok({
+                "success":         True,
+                "platform":        "wb",
+                "products_synced": stats["products_synced"],
+                "prices_updated":  stats["prices_updated"],
+                "prices_changed":  stats["prices_changed"],
+                "sales_updated":   stats["sales_updated"],
+                "total_revenue":   stats["total_revenue"],
+                "total_orders":    stats["total_orders"],
+                "last_sync_at":    last_sync_at,
+                "errors":          stats["errors"],
+            })
 
         # ── action=sales ──────────────────────────────────────────────
         if action == "sales":

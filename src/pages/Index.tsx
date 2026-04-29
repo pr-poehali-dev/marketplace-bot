@@ -1,7 +1,7 @@
 import { useState, useMemo, useEffect, useCallback } from "react";
 import Icon from "@/components/ui/icon";
 import { useAuth } from "@/hooks/useAuth";
-import { apiGetProducts, apiGetPrices, apiSavePrice, apiSyncProducts, apiGetRecommendations, apiGetPriceHistory, apiGetRules, apiCreateRule, apiUpdateRule, apiGetIntegration, apiSaveIntegration, apiVerifyIntegration, apiSyncOzon, apiSyncOzonSales, apiSyncOzonFull, apiPushPriceToOzon, apiSaveWbIntegration, apiGetWbIntegration, apiVerifyWbToken, apiSyncWb, apiSyncWbSales } from "@/lib/api";
+import { apiGetProducts, apiGetPrices, apiSavePrice, apiSyncProducts, apiGetRecommendations, apiGetPriceHistory, apiGetRules, apiCreateRule, apiUpdateRule, apiGetIntegration, apiSaveIntegration, apiVerifyIntegration, apiSyncOzon, apiSyncOzonSales, apiSyncOzonFull, apiPushPriceToOzon, apiSaveWbIntegration, apiGetWbIntegration, apiVerifyWbToken, apiSyncWb, apiSyncWbSales, apiSyncWbFull } from "@/lib/api";
 
 type Section = "sync" | "analytics" | "finance" | "pricing" | "products" | "orders" | "settings";
 type Platform = "all" | "ozon" | "wb";
@@ -809,6 +809,7 @@ export default function Index() {
   const [wbVerifying, setWbVerifying] = useState(false);
   const [wbSyncing, setWbSyncing] = useState(false);
   const [wbSalesSyncing, setWbSalesSyncing] = useState(false);
+  const [wbFullSyncing, setWbFullSyncing] = useState(false);
   const [wbStatus, setWbStatus] = useState<{ ok: boolean; msg: string } | null>(null);
 
   const loadWbIntegration = useCallback(async () => {
@@ -2324,6 +2325,45 @@ export default function Index() {
                   {/* Кнопки синхронизации WB */}
                   {wbIntegration?.connected && (
                     <div className="pt-3 border-t border-border space-y-3">
+
+                      {/* Полная синхронизация */}
+                      <div className="flex items-center justify-between gap-3 p-3 rounded-lg border border-border" style={{ background: "hsl(220,16%,6%)" }}>
+                        <div className="min-w-0">
+                          <div className="flex items-center gap-2 mb-0.5">
+                            <p className="text-sm font-semibold text-foreground">Полная синхронизация</p>
+                            <span className="text-[10px] px-1.5 py-0.5 rounded border border-pink-400/25 text-pink-400 bg-pink-400/10 font-medium">Рекомендуется</span>
+                          </div>
+                          <p className="text-xs text-muted-foreground">Товары + цены + остатки + продажи за 30 дней · раз в час</p>
+                        </div>
+                        <button
+                          disabled={wbFullSyncing || wbSyncing || wbSalesSyncing}
+                          onClick={async () => {
+                            setWbFullSyncing(true);
+                            setWbStatus(null);
+                            const data = await apiSyncWbFull();
+                            if (data?.success) {
+                              const errs = data.errors?.length ? ` · ⚠️ ${data.errors.join(", ")}` : "";
+                              setWbStatus({
+                                ok: !data.errors?.length,
+                                msg: `Товаров: ${data.products_synced} · цен обновлено: ${data.prices_updated} · заказов: ${data.total_orders} · выручка: ${Number(data.total_revenue).toLocaleString("ru-RU")} ₽${errs}`,
+                              });
+                              if (data.last_sync_at) {
+                                setWbIntegration(prev => prev ? { ...prev, last_sync_at: data.last_sync_at } : prev);
+                              }
+                              await loadData();
+                            } else {
+                              setWbStatus({ ok: false, msg: data?.error || "Ошибка полной синхронизации" });
+                            }
+                            setWbFullSyncing(false);
+                          }}
+                          className="flex items-center gap-1.5 text-sm px-4 py-2 rounded text-white transition-all hover:opacity-80 disabled:opacity-50 disabled:cursor-not-allowed shrink-0"
+                          style={{ background: "#CB11AB" }}
+                        >
+                          <Icon name="Zap" size={14} className={wbFullSyncing ? "animate-pulse" : ""} />
+                          {wbFullSyncing ? "Синхронизация..." : "Запустить"}
+                        </button>
+                      </div>
+
                       {/* Товары */}
                       <div className="flex items-center justify-between gap-3">
                         <div className="min-w-0">

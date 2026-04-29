@@ -188,6 +188,15 @@ export async function apiSyncWbSales(days = 30) {
   return parseResponse(res);
 }
 
+export async function apiSyncWbFull() {
+  const res = await fetch(`${SYNC_WB_URL}?action=full`, {
+    method: "POST",
+    headers: authHeaders(),
+    body: JSON.stringify({}),
+  });
+  return parseResponse(res);
+}
+
 // ── Sync Ozon ─────────────────────────────────────────────────────
 
 const SYNC_OZON_URL = "https://functions.poehali.dev/6012000a-4e18-49a7-9787-fc0a61d7d90c";
